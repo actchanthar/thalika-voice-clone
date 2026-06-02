@@ -2,22 +2,9 @@ import { detectScriptLanguage } from "./language-utils";
 import type { GenerateVoiceRequest, ProviderCapability, ProviderPreflightResult, VoiceProvider } from "./types";
 
 export const providerCapabilities: Record<VoiceProvider, ProviderCapability> = {
-  mock: {
-    provider: "mock",
-    name: "Mock Provider",
-    inference: "local_mock",
-    cloneQuality: "mock",
-    privacy: "local",
-    supportedLanguages: ["unknown", "my", "en", "zh", "ja", "ko", "yue", "mixed_supported"],
-    supportedLanguageLabels: ["Any text input"],
-    requiresReferenceAudio: false,
-    canCloneVoice: false,
-    limitations: ["Generates a local sine-wave WAV only.", "Does not clone a real speaker."],
-    recommendation: "Use Mock Provider to test the local workflow, storage, playback, and downloads."
-  },
   voxcpm2: {
     provider: "voxcpm2",
-    name: "VoxCPM2",
+    name: "VoxCPM2 Multilingual",
     inference: "remote_hf",
     cloneQuality: "production",
     privacy: "remote_public",
@@ -53,7 +40,7 @@ export const providerCapabilities: Record<VoiceProvider, ProviderCapability> = {
     requiresReferenceAudio: true,
     canCloneVoice: true,
     limitations: [
-      "VoxCPM2 is selected as the Burmese-capable model track.",
+      "Direct VoxCPM2 engine access for supported multilingual scripts.",
       "Uses the public OpenBMB Hugging Face Space for remote inference.",
       "Highest-fidelity cloning needs clean reference audio and stable Burmese text."
     ],
@@ -71,15 +58,17 @@ export const providerCapabilities: Record<VoiceProvider, ProviderCapability> = {
     requiresReferenceAudio: true,
     canCloneVoice: true,
     limitations: [
-      "Uses VoxCPM2 remote inference as the active Burmese backend.",
+      "Burmese-only production preset over the shared VoxCPM2 remote engine.",
       "A single short upload can attempt voice cloning, but larger consented datasets improve speaker similarity.",
       "Production approval still needs listening tests for similarity, pronunciation, noise, and naturalness."
     ],
-    recommendation: "Use Burmese script plus clean reference audio. Review the generated output before production use."
+    recommendation: "Use this default preset for Burmese scripts plus clean reference audio. Review the generated output before production use."
   }
 };
 
-export function preflightProvider(input: Pick<GenerateVoiceRequest, "provider" | "script" | "referenceAudio">): ProviderPreflightResult {
+export function preflightProvider(
+  input: Pick<GenerateVoiceRequest, "provider" | "script" | "referenceAudio" | "voiceProfileId" | "referenceText" | "normalizationApproved" | "cloneMode">
+): ProviderPreflightResult {
   const capability = providerCapabilities[input.provider];
   const detectedLanguage = detectScriptLanguage(input.script);
 
@@ -114,7 +103,7 @@ export function preflightProvider(input: Pick<GenerateVoiceRequest, "provider" |
       };
     }
 
-    if (!input.referenceAudio) {
+    if (!input.referenceAudio && !input.voiceProfileId) {
       return {
         ok: false,
         severity: "blocked",
@@ -157,7 +146,7 @@ export function preflightProvider(input: Pick<GenerateVoiceRequest, "provider" |
     };
   }
 
-  if (capability.requiresReferenceAudio && !input.referenceAudio) {
+  if (capability.requiresReferenceAudio && !input.referenceAudio && !input.voiceProfileId) {
     return {
       ok: false,
       severity: "blocked",
@@ -171,22 +160,30 @@ export function preflightProvider(input: Pick<GenerateVoiceRequest, "provider" |
   }
 
   if (capability.provider === "burmese_production") {
+    if ((input.cloneMode || "high_fidelity") === "high_fidelity" && !input.referenceText?.trim()) {
+      return {
+        ok: false,
+        severity: "blocked",
+        detectedLanguage,
+        message: "Burmese Production high-fidelity mode requires the exact reference transcript.",
+        nextStep: "Paste the words spoken in the uploaded reference audio."
+      };
+    }
+    if (!input.normalizationApproved) {
+      return {
+        ok: false,
+        severity: "blocked",
+        detectedLanguage,
+        message: "Review and approve the normalized Burmese script before generation.",
+        nextStep: "Check the pronunciation preview and approve it."
+      };
+    }
     return {
       ok: true,
       severity: "info",
       detectedLanguage,
-      message: "Burmese Production uses VoxCPM2 remote inference.",
+      message: "Burmese Production is the Burmese-only preset powered by VoxCPM2 remote inference.",
       nextStep: "Generate with clean reference audio, then check speaker similarity and Burmese pronunciation."
-    };
-  }
-
-  if (capability.provider === "mock") {
-    return {
-      ok: true,
-      severity: "info",
-      detectedLanguage,
-      message: "Mock Provider can test the local workflow but cannot clone a real voice.",
-      nextStep: "Use it for workflow testing only."
     };
   }
 

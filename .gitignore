@@ -39,10 +39,15 @@ Thumbs.db
 data/scripts/*
 data/jobs/*
 data/outputs/*
+data/profiles/*
+data/reviews/*
 data/memory/*
+data/logs/*
 
 # Keep shareable folder placeholders and examples
 !data/scripts/.gitkeep
 !data/jobs/.gitkeep
 !data/outputs/.gitkeep
+!data/profiles/.gitkeep
+!data/reviews/.gitkeep
 !data/memory/MEMORY.example.md

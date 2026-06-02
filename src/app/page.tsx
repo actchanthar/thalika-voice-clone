@@ -8,12 +8,17 @@ import { ScriptInput } from "@/components/ScriptInput";
 import { StatusPanel, type StudioStatus } from "@/components/StatusPanel";
 import { StudioPageShell } from "@/components/StudioPageShell";
 import { VoiceSettings, type ProviderHealth } from "@/components/VoiceSettings";
+import { NormalizationApprovalPanel } from "@/components/NormalizationApprovalPanel";
+import { analyzeReferenceAudio } from "@/lib/browser-reference-audio";
 import { preflightProvider } from "@/lib/provider-capabilities";
 import { MAX_SCRIPT_CHARACTERS } from "@/lib/script-limits";
 import type {
   CloneMode,
   ProviderPreflightResult,
+  BurmeseNormalizationResult,
   ReferenceAudioPayload,
+  ReferenceQualityReport,
+  VoiceProfileSummary,
   VoiceEmotion,
   VoiceProvider
 } from "@/lib/types";
@@ -45,6 +50,13 @@ export default function Home() {
   const [audioResult, setAudioResult] = useState<AudioResult | undefined>();
   const [referenceAudio, setReferenceAudio] = useState<ReferenceAudioPayload | undefined>();
   const [referenceAudioError, setReferenceAudioError] = useState("");
+  const [referenceText, setReferenceText] = useState("");
+  const [referenceQualityReport, setReferenceQualityReport] = useState<ReferenceQualityReport | undefined>();
+  const [profiles, setProfiles] = useState<VoiceProfileSummary[]>([]);
+  const [selectedProfileId, setSelectedProfileId] = useState("");
+  const [normalization, setNormalization] = useState<BurmeseNormalizationResult | undefined>();
+  const [normalizationLoading, setNormalizationLoading] = useState(false);
+  const [normalizationApproved, setNormalizationApproved] = useState(false);
   const [providerHealth, setProviderHealth] = useState<ProviderHealth | undefined>();
   const [providerHealthLoading, setProviderHealthLoading] = useState(false);
   const [draftReady, setDraftReady] = useState(false);
@@ -69,6 +81,45 @@ export default function Home() {
 
     void loadDraft();
   }, []);
+
+  const loadProfiles = useCallback(async () => {
+    const response = await fetch("/api/voice-profiles", { cache: "no-store" });
+    if (!response.ok) return;
+    const data = (await response.json()) as { profiles: VoiceProfileSummary[] };
+    setProfiles(data.profiles);
+  }, []);
+
+  useEffect(() => {
+    void loadProfiles();
+  }, [loadProfiles]);
+
+  const refreshNormalization = useCallback(async () => {
+    if (provider !== "burmese_production" || script.trim().length < 10) {
+      setNormalization(undefined);
+      setNormalizationApproved(false);
+      return;
+    }
+    setNormalizationLoading(true);
+    setNormalizationApproved(false);
+    try {
+      const response = await fetch("/api/burmese/normalize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ script })
+      });
+      if (!response.ok) throw new Error("Could not prepare Burmese pronunciation preview.");
+      setNormalization((await response.json()) as BurmeseNormalizationResult);
+    } catch {
+      setNormalization(undefined);
+    } finally {
+      setNormalizationLoading(false);
+    }
+  }, [provider, script]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void refreshNormalization(), 450);
+    return () => window.clearTimeout(timer);
+  }, [refreshNormalization]);
 
   useEffect(() => {
     if (!draftReady) return;
@@ -132,7 +183,10 @@ export default function Home() {
   }, [script]);
 
   async function handleReferenceAudioChange(file: File | null) {
+    setSelectedProfileId("");
     setReferenceAudio(undefined);
+    setReferenceQualityReport(undefined);
+    setReferenceText("");
     setReferenceAudioError("");
 
     if (!file) return;
@@ -146,20 +200,7 @@ export default function Home() {
     }
 
     try {
-      const durationSeconds = await new Promise<number | undefined>((resolve) => {
-        const audio = document.createElement("audio");
-        const url = URL.createObjectURL(file);
-        audio.preload = "metadata";
-        audio.onloadedmetadata = () => {
-          URL.revokeObjectURL(url);
-          resolve(Number.isFinite(audio.duration) ? audio.duration : undefined);
-        };
-        audio.onerror = () => {
-          URL.revokeObjectURL(url);
-          resolve(undefined);
-        };
-        audio.src = url;
-      });
+      const report = await analyzeReferenceAudio(file);
 
       const dataUrl = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
@@ -172,15 +213,68 @@ export default function Home() {
         filename: file.name,
         mimeType: file.type,
         size: file.size,
-        durationSeconds
+        durationSeconds: report.durationSeconds
       });
+      setReferenceQualityReport(report);
     } catch (caught) {
       setReferenceAudioError(caught instanceof Error ? caught.message : "Could not read reference audio.");
     }
   }
 
+  function selectProfile(id: string) {
+    setSelectedProfileId(id);
+    setReferenceAudio(undefined);
+    setReferenceAudioError("");
+    const profile = profiles.find((item) => item.id === id);
+    setReferenceText(profile?.referenceText || "");
+    setReferenceQualityReport(profile?.qualityReport);
+    if (profile) {
+      setCloneMode(profile.preferredCloneMode);
+      setCloneStrength(profile.preferredCloneStrength);
+      setDenoiseReference(profile.preferredDenoiseReference);
+      setNormalizeText(profile.preferredNormalizeText);
+    }
+  }
+
+  async function saveProfile(name: string, consent: boolean) {
+    if (!referenceAudio || !referenceQualityReport) return;
+    const response = await fetch("/api/voice-profiles", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name,
+        consent,
+        referenceAudio,
+        referenceText,
+        qualityReport: referenceQualityReport,
+        preferredCloneMode: cloneMode,
+        preferredCloneStrength: cloneStrength,
+        preferredDenoiseReference: denoiseReference,
+        preferredNormalizeText: normalizeText
+      })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      setReferenceAudioError(data.error || "Could not save local voice profile.");
+      return;
+    }
+    const profile = data.profile as VoiceProfileSummary;
+    setProfiles((items) => [profile, ...items.filter((item) => item.id !== profile.id)]);
+    setSelectedProfileId(profile.id);
+    setReferenceAudio(undefined);
+  }
+
+  async function deleteProfile() {
+    if (!selectedProfileId || !window.confirm("Delete this local voice profile and its saved reference audio?")) return;
+    await fetch(`/api/voice-profiles/${encodeURIComponent(selectedProfileId)}`, { method: "DELETE" });
+    setSelectedProfileId("");
+    setReferenceText("");
+    setReferenceQualityReport(undefined);
+    await loadProfiles();
+  }
+
   async function generateAudio() {
-    const preflight = preflightProvider({ provider, script, referenceAudio });
+    const preflight = preflightProvider({ provider, script, referenceAudio, voiceProfileId: selectedProfileId || undefined, referenceText, normalizationApproved, cloneMode });
     if (scriptError || !preflight.ok) {
       setError(preflight.message);
       setStatus("failed");
@@ -206,7 +300,13 @@ export default function Home() {
           cloneStrength,
           denoiseReference,
           normalizeText,
-          referenceAudio
+          referenceAudio,
+          referenceText,
+          voiceProfileId: selectedProfileId || undefined,
+          referenceQualityReport,
+          approvedNormalizedScript: normalization?.normalizedScript,
+          lexiconRevision: normalization?.lexiconRevision,
+          normalizationApproved
         })
       });
       const data = await response.json();
@@ -232,20 +332,20 @@ export default function Home() {
   const referenceRequirementError =
     provider === "burmese_production"
       ? referenceAudioError ||
-        (!referenceAudio
+        (!referenceAudio && !selectedProfileId
           ? "Burmese production cloning requires clean reference voice data."
-          : referenceAudio.durationSeconds && referenceAudio.durationSeconds < 3
+          : referenceAudio?.durationSeconds && referenceAudio.durationSeconds < 3
             ? "Reference audio is too short. Use at least 3 seconds, ideally 6-15 seconds."
-            : referenceAudio.durationSeconds && referenceAudio.durationSeconds > 50
+            : referenceAudio?.durationSeconds && referenceAudio.durationSeconds > 50
               ? "Reference audio is too long for VoxCPM2. Trim it to 6-30 seconds of clean speech."
               : "")
       : provider === "voxcpm2"
         ? referenceAudioError ||
-          (!referenceAudio
+          (!referenceAudio && !selectedProfileId
             ? "VoxCPM2 requires reference audio for voice cloning."
-            : referenceAudio.durationSeconds && referenceAudio.durationSeconds < 3
+            : referenceAudio?.durationSeconds && referenceAudio.durationSeconds < 3
               ? "Reference audio is too short. Use at least 3 seconds, ideally 6-15 seconds."
-              : referenceAudio.durationSeconds && referenceAudio.durationSeconds > 50
+              : referenceAudio?.durationSeconds && referenceAudio.durationSeconds > 50
                 ? "Reference audio is too long for VoxCPM2. Trim it to 6-30 seconds of clean speech."
                 : "")
       : referenceAudioError;
@@ -253,14 +353,19 @@ export default function Home() {
     Boolean(scriptError) ||
     isGenerating ||
     ((provider === "voxcpm2" || provider === "burmese_production") &&
-      (!referenceAudio || Boolean(referenceRequirementError)));
-  const activePreflight: ProviderPreflightResult = preflightProvider({ provider, script, referenceAudio });
+      ((!referenceAudio && !selectedProfileId) || Boolean(referenceRequirementError))) ||
+    (provider === "burmese_production" && (referenceQualityReport?.status === "block" || !referenceText.trim() || !normalizationApproved));
+  const activePreflight: ProviderPreflightResult = preflightProvider({ provider, script, referenceAudio, voiceProfileId: selectedProfileId || undefined, referenceText, normalizationApproved, cloneMode });
   const capabilityDisabled = !activePreflight.ok;
-  const disabledReason = scriptError || referenceRequirementError || (!activePreflight.ok ? activePreflight.message : "");
+  const disabledReason =
+    scriptError ||
+    referenceRequirementError ||
+    (referenceQualityReport?.status === "block" ? "Reference audio quality is blocked. Upload a cleaner voice sample." : "") ||
+    (!activePreflight.ok ? activePreflight.message : "");
 
   const workflowSteps = [
     { label: "Script", helper: script.trim() ? "Ready" : "Paste text", icon: FileText, active: Boolean(script.trim()) },
-    { label: "Voice", helper: referenceAudio ? "Uploaded" : "Add sample", icon: UploadCloud, active: Boolean(referenceAudio) },
+    { label: "Voice", helper: referenceAudio || selectedProfileId ? "Ready" : "Add sample", icon: UploadCloud, active: Boolean(referenceAudio || selectedProfileId) },
     { label: "Generate", helper: status === "completed" ? "Done" : "Create audio", icon: WandSparkles, active: status === "completed" }
   ];
   const heroAside = (
@@ -304,6 +409,9 @@ export default function Home() {
               onTitleChange={setTitle}
               onScriptChange={setScript}
             />
+            {provider === "burmese_production" && (
+              <NormalizationApprovalPanel result={normalization} loading={normalizationLoading} approved={normalizationApproved} onRefresh={() => void refreshNormalization()} onApprove={() => setNormalizationApproved(true)} />
+            )}
           </div>
 
           <aside className="grid content-start gap-5">
@@ -316,6 +424,10 @@ export default function Home() {
               denoiseReference={denoiseReference}
               normalizeText={normalizeText}
               referenceAudio={referenceAudio}
+              referenceText={referenceText}
+              referenceQualityReport={referenceQualityReport}
+              profiles={profiles}
+              selectedProfileId={selectedProfileId}
               referenceAudioError={referenceRequirementError}
               providerHealth={providerHealth}
               providerHealthLoading={providerHealthLoading}
@@ -327,6 +439,11 @@ export default function Home() {
               onDenoiseReferenceChange={setDenoiseReference}
               onNormalizeTextChange={setNormalizeText}
               onReferenceAudioChange={handleReferenceAudioChange}
+              onReferenceTextChange={setReferenceText}
+              onProfileSelect={selectProfile}
+              onProfileSave={(name, consent) => void saveProfile(name, consent)}
+              onProfileDelete={() => void deleteProfile()}
+              onLexiconSaved={() => void refreshNormalization()}
               onRefreshProviderHealth={refreshProviderHealth}
             />
             <GenerateButton

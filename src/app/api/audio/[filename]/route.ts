@@ -2,6 +2,7 @@ import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import { Readable } from "node:stream";
 import { NextResponse } from "next/server";
+import { detectAudioFileFormat } from "@/lib/audio-utils";
 import { outputsDir, safeJoin } from "@/lib/file-utils";
 
 export const runtime = "nodejs";
@@ -37,13 +38,14 @@ export async function GET(request: Request, context: { params: Promise<{ filenam
   }
 
   const extension = filename.split(".").pop()?.toLowerCase();
-  const contentType = extension === "mp3" ? "audio/mpeg" : extension === "wav" ? "audio/wav" : null;
-  if (!contentType) {
+  if (extension !== "mp3" && extension !== "wav") {
     return NextResponse.json({ error: "Unsupported audio format" }, { status: 400 });
   }
 
   try {
     const { size } = await fs.stat(filePath);
+    const actualFormat = await detectAudioFileFormat(filePath);
+    const contentType = actualFormat === "mp3" ? "audio/mpeg" : "audio/wav";
     const range = parseRange(request.headers.get("range"), size);
     if (range === null) {
       return new NextResponse(null, {

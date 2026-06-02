@@ -5,13 +5,20 @@ export const dataDir = path.join(process.cwd(), "data");
 export const scriptsDir = path.join(dataDir, "scripts");
 export const jobsDir = path.join(dataDir, "jobs");
 export const outputsDir = path.join(dataDir, "outputs");
+export const logsDir = path.join(dataDir, "logs");
+export const profilesDir = path.join(dataDir, "profiles");
+export const reviewsDir = path.join(dataDir, "reviews");
 export const memoryFile = path.join(dataDir, "memory", "MEMORY.md");
+export const burmeseLexiconFile = path.join(dataDir, "memory", "burmese-lexicon.json");
 
 export async function ensureDataDirs() {
   await Promise.all([
     fs.mkdir(scriptsDir, { recursive: true }),
     fs.mkdir(jobsDir, { recursive: true }),
     fs.mkdir(outputsDir, { recursive: true }),
+    fs.mkdir(logsDir, { recursive: true }),
+    fs.mkdir(profilesDir, { recursive: true }),
+    fs.mkdir(reviewsDir, { recursive: true }),
     fs.mkdir(path.dirname(memoryFile), { recursive: true })
   ]);
 }

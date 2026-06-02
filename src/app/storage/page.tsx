@@ -36,6 +36,8 @@ const folderIcons: Record<string, typeof FileText> = {
   scripts: FileText,
   jobs: CheckCircle2,
   outputs: FileAudio2,
+  profiles: FileAudio2,
+  reviews: CheckCircle2,
   memory: FolderOpen
 };
 

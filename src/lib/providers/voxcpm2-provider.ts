@@ -1,22 +1,26 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { mergeWavFiles } from "../audio-utils";
+import { detectAudioFileFormat, mergeAudioFiles } from "../audio-utils";
 import { ensureDataDirs, idStamp, outputsDir, safeJoin, sanitizeFilename } from "../file-utils";
 import { REMOTE_TTS_CHUNK_CHARACTERS } from "../script-limits";
 import { splitScriptIntoChunks } from "../script-chunker";
-import type { GenerateVoiceInput, ReferenceAudioPayload, VoiceEmotion } from "../types";
+import type { GenerateVoiceInput, GenerateVoiceResult, ReferenceAudioPayload, VoiceEmotion } from "../types";
+import { appendGenerationLog } from "../storage/generation-log";
 import type { TTSProvider } from "./base";
 import {
   assertOkResponse,
   extractAudioUrlFromEvents,
+  fetchTextWithTimeout,
   fetchWithTimeout,
+  getHFInferenceTimeout,
   getHFRequestTimeout,
   parseSSEData,
   parseUploadResponse,
   readJsonResponse,
   RemoteProviderError,
   shouldRetryHFError,
+  summarizeRemoteEvents,
   TimeoutError,
   withRetry
 } from "./hf-utils";
@@ -28,6 +32,14 @@ const emotionControls: Record<VoiceEmotion, string> = {
   energetic: "energetic but speaker-consistent expression",
   dramatic: "expressive but speaker-consistent delivery"
 };
+
+function speedControl(speed: number) {
+  if (speed <= 0.85) return "slow, deliberate pacing";
+  if (speed <= 0.95) return "slightly slower pacing";
+  if (speed >= 1.15) return "brisk pacing";
+  if (speed >= 1.05) return "slightly faster pacing";
+  return "natural pacing";
+}
 
 function decodeReferenceAudio(referenceAudio: ReferenceAudioPayload) {
   const match = referenceAudio.dataUrl.match(/^data:(audio\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
@@ -65,20 +77,22 @@ async function callVoxCPM2(
   uploadedReferencePath: string,
   scriptChunk: string,
   chunkIndex: number,
-  chunkCount: number
+  chunkCount: number,
+  useReferenceTranscript = true
 ) {
   const cloneMode = input.cloneMode || "high_fidelity";
   const cloneStrength = Math.min(3, Math.max(1, input.cloneStrength ?? (cloneMode === "high_fidelity" ? 2.8 : 2.2)));
   const denoiseReference = input.denoiseReference ?? false;
   const normalizeText = input.normalizeText ?? true;
+  const referenceText = useReferenceTranscript ? input.referenceText?.trim() || "" : "";
   const continuityInstruction =
     chunkCount > 1
       ? ` This is segment ${chunkIndex + 1} of ${chunkCount}; keep the same speaker identity, pace, volume, accent, and emotional style so all segments join naturally.`
       : "";
   const controlInstruction =
     cloneMode === "high_fidelity"
-      ? `Preserve the uploaded speaker identity as closely as possible: timbre, accent, pitch range, rhythm, breath, tone, speaking style, and Burmese pronunciation. Use ${emotionControls[input.emotion]}.${continuityInstruction}`
-      : `Clone the uploaded speaker while keeping natural speech. Use ${emotionControls[input.emotion]}.${continuityInstruction}`;
+      ? `Preserve the uploaded speaker identity as closely as possible: timbre, accent, pitch range, rhythm, breath, tone, speaking style, and Burmese pronunciation. Use ${emotionControls[input.emotion]} with ${speedControl(input.speed)}.${continuityInstruction}`
+      : `Clone the uploaded speaker while keeping natural speech. Use ${emotionControls[input.emotion]} with ${speedControl(input.speed)}.${continuityInstruction}`;
   const body = {
     data: [
       scriptChunk,
@@ -89,8 +103,8 @@ async function callVoxCPM2(
         mime_type: input.referenceAudio?.mimeType || "audio/wav",
         meta: { _type: "gradio.FileData" }
       },
-      false,
-      "",
+      Boolean(referenceText),
+      referenceText,
       cloneStrength,
       normalizeText,
       denoiseReference
@@ -111,15 +125,26 @@ async function callVoxCPM2(
     });
   }
 
-  const resultResponse = await fetchWithTimeout(`${baseUrl}/gradio_api/call/generate/${json.event_id}`, {
+  const { response: resultResponse, text: resultText } = await fetchTextWithTimeout(`${baseUrl}/gradio_api/call/generate/${json.event_id}`, {
     method: "GET",
     headers: { Accept: "text/event-stream" }
   });
   assertOkResponse(resultResponse, "VoxCPM2 remote inference failed");
 
-  const resultText = await resultResponse.text();
   const events = parseSSEData(resultText);
-  return extractAudioUrlFromEvents(events, baseUrl);
+  try {
+    return extractAudioUrlFromEvents(events, baseUrl);
+  } catch (error) {
+    await appendGenerationLog("remote_sse_without_audio", {
+      jobId: input.jobId,
+      chunk: chunkIndex + 1,
+      chunks: chunkCount,
+      referenceTranscriptRequested: Boolean(referenceText),
+      events: JSON.stringify(summarizeRemoteEvents(events)),
+      error: diagnosticError(error)
+    });
+    throw error;
+  }
 }
 
 async function downloadRemoteAudio(audioUrl: string) {
@@ -149,6 +174,18 @@ function normalizeVoxCPM2Error(error: unknown) {
   return "VoxCPM2 remote inference failed";
 }
 
+function diagnosticError(error: unknown) {
+  if (error instanceof Error) return `${error.name}: ${error.message}`;
+  return "Unknown remote inference error";
+}
+
+function shouldFallbackFromTranscript(error: unknown) {
+  return (
+    error instanceof RemoteProviderError &&
+    (error.message.startsWith("Missing audio output") || error.message.startsWith("Remote Space generation error"))
+  );
+}
+
 async function generateRemote(input: GenerateVoiceInput) {
   if (!input.referenceAudio) {
     throw new RemoteProviderError("Missing reference audio", {
@@ -166,48 +203,149 @@ async function generateRemote(input: GenerateVoiceInput) {
     });
   }
 
-  const uploadedReferencePath = await withRetry(() => uploadReferenceAudio(baseUrl, referenceAudio), shouldRetryHFError, 2);
-  const filename = sanitizeFilename(`voice_${idStamp()}.wav`);
-  const audioFilePath = safeJoin(outputsDir, filename);
+  const uploadedReferencePath = await withRetry(
+    () => uploadReferenceAudio(baseUrl, referenceAudio),
+    shouldRetryHFError,
+    2,
+    async (error, attempt) => {
+      await appendGenerationLog("reference_upload_retry", {
+        jobId: input.jobId,
+        attempt,
+        error: diagnosticError(error)
+      });
+    }
+  );
+  const outputStem = sanitizeFilename(`voice_${idStamp()}`);
   const temporaryDir = await fs.mkdtemp(path.join(os.tmpdir(), "thalika-voxcpm2-"));
+  let result: GenerateVoiceResult | undefined;
+  let referenceTranscriptEnabled = Boolean(input.referenceText?.trim());
+  let transcriptFallbackUsed = false;
 
   try {
     const audioChunkPaths: string[] = [];
+    await appendGenerationLog("generation_started", {
+      jobId: input.jobId,
+      provider: "voxcpm2",
+      characters: input.script.length,
+      chunks: chunks.length
+    });
+    await input.onProgress?.({
+      completedChunks: 0,
+      totalChunks: chunks.length,
+      message: `Preparing ${chunks.length} audio segment${chunks.length === 1 ? "" : "s"}.`
+    });
+
     for (const [chunkIndex, chunk] of chunks.entries()) {
-      const audio = await withRetry(async () => {
-        const remoteAudioUrl = await callVoxCPM2(baseUrl, input, uploadedReferencePath, chunk, chunkIndex, chunks.length);
-        return downloadRemoteAudio(remoteAudioUrl);
-      }, shouldRetryHFError, 2);
-      const chunkPath = path.join(temporaryDir, `chunk-${chunkIndex}.wav`);
+      await appendGenerationLog("chunk_started", {
+        jobId: input.jobId,
+        chunk: chunkIndex + 1,
+        chunks: chunks.length,
+        characters: chunk.length
+      });
+      await input.onProgress?.({
+        completedChunks: chunkIndex,
+        totalChunks: chunks.length,
+        message: `Generating audio segment ${chunkIndex + 1} of ${chunks.length}.`
+      });
+      const audio = await withRetry(
+        async () => {
+          let remoteAudioUrl: string;
+          try {
+            remoteAudioUrl = await callVoxCPM2(
+              baseUrl,
+              input,
+              uploadedReferencePath,
+              chunk,
+              chunkIndex,
+              chunks.length,
+              referenceTranscriptEnabled
+            );
+          } catch (error) {
+            if (!referenceTranscriptEnabled || !shouldFallbackFromTranscript(error)) throw error;
+            transcriptFallbackUsed = true;
+            referenceTranscriptEnabled = false;
+            await appendGenerationLog("transcript_mode_fallback", {
+              jobId: input.jobId,
+              chunk: chunkIndex + 1,
+              chunks: chunks.length,
+              error: diagnosticError(error)
+            });
+            remoteAudioUrl = await callVoxCPM2(baseUrl, input, uploadedReferencePath, chunk, chunkIndex, chunks.length, false);
+          }
+          return downloadRemoteAudio(remoteAudioUrl);
+        },
+        shouldRetryHFError,
+        2,
+        async (error, attempt) => {
+          await appendGenerationLog("chunk_retry", {
+            jobId: input.jobId,
+            chunk: chunkIndex + 1,
+            chunks: chunks.length,
+            attempt,
+            error: diagnosticError(error)
+          });
+        }
+      );
+      const chunkPath = path.join(temporaryDir, `chunk-${chunkIndex}.audio`);
       await fs.writeFile(chunkPath, audio);
       audioChunkPaths.push(chunkPath);
+      await appendGenerationLog("chunk_completed", {
+        jobId: input.jobId,
+        chunk: chunkIndex + 1,
+        chunks: chunks.length,
+        bytes: audio.length
+      });
+      await input.onProgress?.({
+        completedChunks: chunkIndex + 1,
+        totalChunks: chunks.length,
+        message: `Generated audio segment ${chunkIndex + 1} of ${chunks.length}.`
+      });
     }
 
-    await mergeWavFiles(audioChunkPaths, audioFilePath);
+    const format = await detectAudioFileFormat(audioChunkPaths[0]);
+    const filename = sanitizeFilename(`${outputStem}.${format}`);
+    const audioFilePath = safeJoin(outputsDir, filename);
+    await appendGenerationLog("merge_started", { jobId: input.jobId, chunks: chunks.length, format });
+    await mergeAudioFiles(audioChunkPaths, audioFilePath, format);
+    await appendGenerationLog("generation_completed", { jobId: input.jobId, chunks: chunks.length, filename, format });
+    result = {
+      filename,
+      audioFilePath,
+      format,
+      localAudioUrl: `/api/audio/${filename}`,
+      metadata: {
+        remoteProvider: "huggingface-space",
+        remoteBaseUrl: baseUrl,
+        mode: "voxcpm2-controllable-cloning",
+        cloneMode: input.cloneMode || "high_fidelity",
+        cloneStrength: input.cloneStrength ?? 2.8,
+        denoiseReference: input.denoiseReference ?? false,
+        normalizeText: input.normalizeText ?? true,
+        referenceTranscriptUsed: Boolean(input.referenceText?.trim()),
+        transcriptFallbackUsed,
+        paceGuidance: speedControl(input.speed),
+        chunkedGeneration: chunks.length > 1,
+        chunkCount: chunks.length,
+        chunkMaxCharacters: REMOTE_TTS_CHUNK_CHARACTERS,
+        originalCharacters: input.script.length,
+        timeoutMs: getHFRequestTimeout(),
+        inferenceTimeoutMs: getHFInferenceTimeout()
+      }
+    };
+  } catch (error) {
+    await appendGenerationLog("generation_failed", {
+      jobId: input.jobId,
+      chunks: chunks.length,
+      error: diagnosticError(error),
+      publicMessage: normalizeVoxCPM2Error(error)
+    });
+    throw error;
   } finally {
     await fs.rm(temporaryDir, { recursive: true, force: true });
   }
 
-  return {
-    filename,
-    audioFilePath,
-    format: "wav" as const,
-    localAudioUrl: `/api/audio/${filename}`,
-    metadata: {
-      remoteProvider: "huggingface-space",
-      remoteBaseUrl: baseUrl,
-      mode: "voxcpm2-controllable-cloning",
-      cloneMode: input.cloneMode || "high_fidelity",
-      cloneStrength: input.cloneStrength ?? 2.8,
-      denoiseReference: input.denoiseReference ?? false,
-      normalizeText: input.normalizeText ?? true,
-      chunkedGeneration: chunks.length > 1,
-      chunkCount: chunks.length,
-      chunkMaxCharacters: REMOTE_TTS_CHUNK_CHARACTERS,
-      originalCharacters: input.script.length,
-      timeoutMs: getHFRequestTimeout()
-    }
-  };
+  if (!result) throw new Error("VoxCPM2 generation completed without a local audio result.");
+  return result;
 }
 
 export const voxcpm2Provider: TTSProvider = {

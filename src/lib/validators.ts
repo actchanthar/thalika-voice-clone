@@ -9,6 +9,17 @@ const referenceAudioSchema = z.object({
   durationSeconds: z.number().positive().optional()
 });
 
+const referenceQualitySchema = z.object({
+  durationSeconds: z.number().positive(),
+  silenceRatio: z.number().min(0).max(1),
+  clippingRatio: z.number().min(0).max(1),
+  rms: z.number().min(0).max(1),
+  peak: z.number().min(0).max(1),
+  score: z.number().min(0).max(100),
+  status: z.enum(["pass", "warn", "block"]),
+  issues: z.array(z.string().max(200)).max(20)
+});
+
 export const generateRequestSchema = z
   .object({
     title: z.string().trim().max(100, "Title must be 100 characters or fewer").optional().or(z.literal("")),
@@ -17,7 +28,7 @@ export const generateRequestSchema = z
       .trim()
       .min(10, "Script must be at least 10 characters")
       .max(MAX_SCRIPT_CHARACTERS, `Script must be ${MAX_SCRIPT_CHARACTERS.toLocaleString()} characters or fewer`),
-    provider: z.enum(["mock", "voxcpm2", "burmese_production"]),
+    provider: z.enum(["voxcpm2", "burmese_production"]),
     format: z.literal("wav"),
     speed: z.number().min(0.8, "Speed must be at least 0.8").max(1.2, "Speed must be at most 1.2"),
     emotion: z.enum(["neutral", "calm", "energetic", "dramatic"]),
@@ -26,21 +37,47 @@ export const generateRequestSchema = z
     denoiseReference: z.boolean().optional(),
     normalizeText: z.boolean().optional(),
     referenceAudio: referenceAudioSchema.optional(),
-    referenceText: z.string().trim().max(1000, "Reference transcript must be 1000 characters or fewer").optional().or(z.literal(""))
+    referenceText: z.string().trim().max(2000, "Reference transcript must be 2000 characters or fewer").optional().or(z.literal("")),
+    voiceProfileId: z.string().regex(/^profile_[a-zA-Z0-9_-]+$/, "Invalid voice profile id").optional(),
+    referenceQualityReport: referenceQualitySchema.optional(),
+    approvedNormalizedScript: z.string().trim().max(MAX_SCRIPT_CHARACTERS).optional(),
+    lexiconRevision: z.string().trim().max(100).optional(),
+    normalizationApproved: z.boolean().optional()
   })
   .superRefine((value, context) => {
-    if (value.provider === "burmese_production" && !value.referenceAudio) {
+    if (value.provider === "burmese_production" && !value.referenceAudio && !value.voiceProfileId) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["referenceAudio"],
         message: "Burmese production cloning requires clean reference voice data"
       });
     }
-    if (value.provider === "voxcpm2" && !value.referenceAudio) {
+    if (value.provider === "voxcpm2" && !value.referenceAudio && !value.voiceProfileId) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["referenceAudio"],
         message: "VoxCPM2 requires reference audio for voice cloning"
+      });
+    }
+    if (value.provider === "burmese_production" && (value.cloneMode || "high_fidelity") === "high_fidelity" && !value.referenceText?.trim() && !value.voiceProfileId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["referenceText"],
+        message: "Burmese high-fidelity cloning requires the exact reference transcript"
+      });
+    }
+    if (value.provider === "burmese_production" && (!value.normalizationApproved || !value.approvedNormalizedScript || !value.lexiconRevision)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["normalizationApproved"],
+        message: "Review and approve the normalized Burmese script before generation"
+      });
+    }
+    if (value.provider === "burmese_production" && value.referenceQualityReport?.status === "block") {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["referenceQualityReport"],
+        message: "Reference audio quality is blocked. Upload a cleaner voice sample"
       });
     }
     if ((value.provider === "voxcpm2" || value.provider === "burmese_production") && value.referenceAudio?.durationSeconds) {

@@ -2,56 +2,7 @@ import { createReadStream, createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { once } from "node:events";
-import type { VoiceEmotion } from "./types";
-
-const emotionFrequency: Record<VoiceEmotion, number> = {
-  neutral: 440,
-  calm: 330,
-  energetic: 660,
-  dramatic: 220
-};
-
-export function durationFromScript(script: string) {
-  return Math.min(10, Math.max(2, Math.ceil(script.length / 450)));
-}
-
-export function createSineWaveWavBuffer(script: string, emotion: VoiceEmotion, speed: number) {
-  const sampleRate = 44100;
-  const channels = 1;
-  const bitsPerSample = 16;
-  const baseDuration = durationFromScript(script);
-  const durationSeconds = Math.min(10, Math.max(2, baseDuration / speed));
-  const samples = Math.floor(sampleRate * durationSeconds);
-  const bytesPerSample = bitsPerSample / 8;
-  const dataSize = samples * channels * bytesPerSample;
-  const buffer = Buffer.alloc(44 + dataSize);
-  const frequency = emotionFrequency[emotion];
-
-  buffer.write("RIFF", 0);
-  buffer.writeUInt32LE(36 + dataSize, 4);
-  buffer.write("WAVE", 8);
-  buffer.write("fmt ", 12);
-  buffer.writeUInt32LE(16, 16);
-  buffer.writeUInt16LE(1, 20);
-  buffer.writeUInt16LE(channels, 22);
-  buffer.writeUInt32LE(sampleRate, 24);
-  buffer.writeUInt32LE(sampleRate * channels * bytesPerSample, 28);
-  buffer.writeUInt16LE(channels * bytesPerSample, 32);
-  buffer.writeUInt16LE(bitsPerSample, 34);
-  buffer.write("data", 36);
-  buffer.writeUInt32LE(dataSize, 40);
-
-  for (let i = 0; i < samples; i += 1) {
-    const fadeIn = Math.min(1, i / (sampleRate * 0.05));
-    const fadeOut = Math.min(1, (samples - i) / (sampleRate * 0.08));
-    const envelope = Math.min(fadeIn, fadeOut) * 0.25;
-    const wobble = Math.sin((2 * Math.PI * i) / sampleRate / 0.35) * 8;
-    const value = Math.sin((2 * Math.PI * (frequency + wobble) * i) / sampleRate) * envelope;
-    buffer.writeInt16LE(Math.floor(value * 32767), 44 + i * 2);
-  }
-
-  return buffer;
-}
+import type { OutputFormat } from "./types";
 
 interface ParsedWav {
   audioFormat: number;
@@ -61,105 +12,6 @@ interface ParsedWav {
   blockAlign: number;
   bitsPerSample: number;
   data: Buffer;
-}
-
-function readWavChunk(buffer: Buffer, offset: number) {
-  if (offset + 8 > buffer.length) return undefined;
-  const id = buffer.toString("ascii", offset, offset + 4);
-  const size = buffer.readUInt32LE(offset + 4);
-  const dataStart = offset + 8;
-  const dataEnd = dataStart + size;
-  if (dataEnd > buffer.length) return undefined;
-  return { id, size, dataStart, dataEnd, nextOffset: dataEnd + (size % 2) };
-}
-
-function parsePcmWav(buffer: Buffer): ParsedWav {
-  if (buffer.length < 44 || buffer.toString("ascii", 0, 4) !== "RIFF" || buffer.toString("ascii", 8, 12) !== "WAVE") {
-    throw new Error("Only WAV audio can be merged into a final local file.");
-  }
-
-  let offset = 12;
-  let fmt: ParsedWav | undefined;
-  let data: Buffer | undefined;
-
-  while (offset < buffer.length) {
-    const chunk = readWavChunk(buffer, offset);
-    if (!chunk) break;
-
-    if (chunk.id === "fmt ") {
-      if (chunk.size < 16) throw new Error("Invalid WAV fmt chunk.");
-      fmt = {
-        audioFormat: buffer.readUInt16LE(chunk.dataStart),
-        channels: buffer.readUInt16LE(chunk.dataStart + 2),
-        sampleRate: buffer.readUInt32LE(chunk.dataStart + 4),
-        byteRate: buffer.readUInt32LE(chunk.dataStart + 8),
-        blockAlign: buffer.readUInt16LE(chunk.dataStart + 12),
-        bitsPerSample: buffer.readUInt16LE(chunk.dataStart + 14),
-        data: Buffer.alloc(0)
-      };
-    }
-
-    if (chunk.id === "data") {
-      data = buffer.subarray(chunk.dataStart, chunk.dataEnd);
-    }
-
-    offset = chunk.nextOffset;
-  }
-
-  if (!fmt || !data) throw new Error("Invalid WAV audio.");
-  if (fmt.audioFormat !== 1) throw new Error("Only PCM WAV audio can be merged.");
-
-  return { ...fmt, data };
-}
-
-export function mergeWavBuffers(buffers: Buffer[], gapMilliseconds = 180) {
-  if (buffers.length === 0) throw new Error("No WAV audio chunks to merge.");
-  if (buffers.length === 1) return buffers[0];
-
-  const parsed = buffers.map(parsePcmWav);
-  const first = parsed[0];
-
-  for (const wav of parsed.slice(1)) {
-    const compatible =
-      wav.audioFormat === first.audioFormat &&
-      wav.channels === first.channels &&
-      wav.sampleRate === first.sampleRate &&
-      wav.blockAlign === first.blockAlign &&
-      wav.bitsPerSample === first.bitsPerSample;
-
-    if (!compatible) {
-      throw new Error("Generated WAV chunks have different audio formats and cannot be merged safely.");
-    }
-  }
-
-  const silenceBytes = Math.floor((first.byteRate * gapMilliseconds) / 1000 / first.blockAlign) * first.blockAlign;
-  const silence = Buffer.alloc(silenceBytes);
-  const dataParts = parsed.flatMap((wav, index) => (index === parsed.length - 1 ? [wav.data] : [wav.data, silence]));
-  const dataSize = dataParts.reduce((total, part) => total + part.length, 0);
-  if (dataSize > 0xffffffff - 36) throw new Error("Merged WAV file is too large.");
-
-  const output = Buffer.alloc(44 + dataSize);
-  output.write("RIFF", 0);
-  output.writeUInt32LE(36 + dataSize, 4);
-  output.write("WAVE", 8);
-  output.write("fmt ", 12);
-  output.writeUInt32LE(16, 16);
-  output.writeUInt16LE(first.audioFormat, 20);
-  output.writeUInt16LE(first.channels, 22);
-  output.writeUInt32LE(first.sampleRate, 24);
-  output.writeUInt32LE(first.byteRate, 28);
-  output.writeUInt16LE(first.blockAlign, 32);
-  output.writeUInt16LE(first.bitsPerSample, 34);
-  output.write("data", 36);
-  output.writeUInt32LE(dataSize, 40);
-
-  let writeOffset = 44;
-  for (const part of dataParts) {
-    part.copy(output, writeOffset);
-    writeOffset += part.length;
-  }
-
-  return output;
 }
 
 interface ParsedWavFile extends Omit<ParsedWav, "data"> {
@@ -251,6 +103,62 @@ async function writePart(output: ReturnType<typeof createWriteStream>, data: Buf
   if (!output.write(data)) {
     await once(output, "drain");
   }
+}
+
+export async function detectAudioFileFormat(filePath: string): Promise<OutputFormat> {
+  const file = await fs.open(filePath, "r");
+
+  try {
+    const header = Buffer.alloc(12);
+    const { bytesRead } = await file.read(header, 0, header.length, 0);
+    if (bytesRead >= 12 && header.toString("ascii", 0, 4) === "RIFF" && header.toString("ascii", 8, 12) === "WAVE") {
+      return "wav";
+    }
+
+    const hasId3Header = bytesRead >= 3 && header.toString("ascii", 0, 3) === "ID3";
+    const hasMpegFrameSync = bytesRead >= 2 && header[0] === 0xff && (header[1] & 0xe0) === 0xe0;
+    if (hasId3Header || hasMpegFrameSync) {
+      return "mp3";
+    }
+  } finally {
+    await file.close();
+  }
+
+  throw new Error("Remote provider returned an unsupported audio format.");
+}
+
+async function mergeMp3Files(filePaths: string[], outputFilePath: string) {
+  const output = createWriteStream(outputFilePath);
+  try {
+    for (const filePath of filePaths) {
+      const input = createReadStream(filePath);
+      for await (const chunk of input) {
+        await writePart(output, chunk as Buffer);
+      }
+    }
+    output.end();
+    await once(output, "finish");
+  } catch (error) {
+    output.destroy();
+    await fs.rm(outputFilePath, { force: true });
+    throw error;
+  }
+}
+
+export async function mergeAudioFiles(filePaths: string[], outputFilePath: string, format: OutputFormat, gapMilliseconds = 180) {
+  if (filePaths.length === 0) throw new Error("No audio chunks to merge.");
+
+  const formats = await Promise.all(filePaths.map(detectAudioFileFormat));
+  if (formats.some((value) => value !== format)) {
+    throw new Error("Generated audio chunks have different formats and cannot be merged safely.");
+  }
+
+  if (format === "mp3") {
+    await mergeMp3Files(filePaths, outputFilePath);
+    return;
+  }
+
+  await mergeWavFiles(filePaths, outputFilePath, gapMilliseconds);
 }
 
 export async function mergeWavFiles(filePaths: string[], outputFilePath: string, gapMilliseconds = 180) {

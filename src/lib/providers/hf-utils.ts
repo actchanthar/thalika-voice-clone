@@ -26,6 +26,11 @@ export function getHFRequestTimeout() {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 60000;
 }
 
+export function getHFInferenceTimeout() {
+  const parsed = Number(process.env.HF_INFERENCE_TIMEOUT || 300000);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 300000;
+}
+
 export async function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs = getHFRequestTimeout()) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -45,6 +50,27 @@ export async function fetchWithTimeout(url: string, init: RequestInit = {}, time
   }
 }
 
+export async function fetchTextWithTimeout(url: string, init: RequestInit = {}, timeoutMs = getHFInferenceTimeout()) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      ...init,
+      signal: controller.signal
+    });
+    const text = await response.text();
+    return { response, text };
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new TimeoutError();
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function retryDelay(attempt: number) {
   return 600 * 2 ** attempt;
 }
@@ -53,7 +79,12 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function withRetry<T>(operation: () => Promise<T>, shouldRetry: (error: unknown) => boolean, attempts = 2) {
+export async function withRetry<T>(
+  operation: () => Promise<T>,
+  shouldRetry: (error: unknown) => boolean,
+  attempts = 2,
+  onRetry?: (error: unknown, nextAttempt: number) => Promise<void> | void
+) {
   let lastError: unknown;
 
   for (let attempt = 0; attempt <= attempts; attempt += 1) {
@@ -64,6 +95,7 @@ export async function withRetry<T>(operation: () => Promise<T>, shouldRetry: (er
       if (attempt >= attempts || !shouldRetry(error)) {
         throw error;
       }
+      await onRetry?.(error, attempt + 2);
       await sleep(retryDelay(attempt));
     }
   }
@@ -172,6 +204,25 @@ function collectAudioCandidates(value: unknown): string[] {
   return [];
 }
 
+function collectRemoteMessages(value: unknown): string[] {
+  if (!value) return [];
+  if (typeof value === "string") return value.length <= 500 ? [value] : [];
+  if (Array.isArray(value)) return value.flatMap((item) => collectRemoteMessages(item));
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return ["error", "message", "detail"].flatMap((key) => collectRemoteMessages(record[key]));
+  }
+  return [];
+}
+
+export function summarizeRemoteEvents(events: unknown[]) {
+  return events.map((event) => {
+    if (Array.isArray(event)) return { type: "array", items: event.length };
+    if (event && typeof event === "object") return { type: "object", keys: Object.keys(event as Record<string, unknown>).slice(0, 12) };
+    return { type: typeof event, value: typeof event === "string" ? event.slice(0, 200) : String(event) };
+  });
+}
+
 export function extractAudioUrlFromEvents(events: unknown[], baseUrl: string) {
   for (const event of events.reverse()) {
     const candidates = collectAudioCandidates(event);
@@ -182,7 +233,15 @@ export function extractAudioUrlFromEvents(events: unknown[], baseUrl: string) {
     return `${baseUrl}/gradio_api/file=${encodeURIComponent(candidate)}`;
   }
 
+  const remoteMessage = collectRemoteMessages(events).find(Boolean);
+  if (remoteMessage) {
+    throw new RemoteProviderError(`Remote Space generation error: ${remoteMessage}`, {
+      publicMessage: "VoxCPM2 Space could not generate this audio segment."
+    });
+  }
+
   throw new RemoteProviderError("Missing audio output", {
-    publicMessage: "Invalid response from remote Space."
+    publicMessage: "VoxCPM2 Space returned no audio for this segment.",
+    retryable: true
   });
 }

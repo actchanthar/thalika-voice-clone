@@ -1,12 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
-import { dataDir, ensureDataDirs, jobsDir, memoryFile, outputsDir, scriptsDir } from "@/lib/file-utils";
+import { dataDir, ensureDataDirs, jobsDir, memoryFile, outputsDir, profilesDir, reviewsDir, scriptsDir } from "@/lib/file-utils";
 
 export const runtime = "nodejs";
 
 interface FolderDefinition {
-  id: "data" | "scripts" | "jobs" | "outputs" | "memory";
+  id: "data" | "scripts" | "jobs" | "outputs" | "profiles" | "reviews" | "memory";
   label: string;
   description: string;
   path: string;
@@ -38,9 +38,23 @@ const folderDefinitions: FolderDefinition[] = [
   {
     id: "outputs",
     label: "Audio outputs",
-    description: "Generated WAV audio files served through the local audio route.",
+    description: "Generated audio files served through the local audio route.",
     path: outputsDir,
-    extensions: [".wav"]
+    extensions: [".wav", ".mp3"]
+  },
+  {
+    id: "profiles",
+    label: "Voice profiles",
+    description: "Consented local reference audio and profile metadata.",
+    path: profilesDir,
+    extensions: [".json", ".wav", ".mp3", ".m4a"]
+  },
+  {
+    id: "reviews",
+    label: "Listening QA",
+    description: "Human listening review scores stored as Markdown.",
+    path: reviewsDir,
+    extensions: [".md"]
   },
   {
     id: "memory",

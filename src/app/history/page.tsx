@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { HistoryPanel } from "@/components/HistoryPanel";
 import { StudioPageShell } from "@/components/StudioPageShell";
+import type { ListeningReview } from "@/lib/types";
 
 interface HistoryJob {
   id: string;
@@ -13,6 +14,10 @@ interface HistoryJob {
   createdAt: string;
   audioFile?: string;
   status: string;
+  completedChunks?: number;
+  totalChunks?: number;
+  progressMessage?: string;
+  review?: ListeningReview;
 }
 
 export default function HistoryPage() {
@@ -29,6 +34,12 @@ export default function HistoryPage() {
   useEffect(() => {
     void loadHistory();
   }, [loadHistory]);
+
+  useEffect(() => {
+    if (!jobs.some((job) => job.status === "generating")) return;
+    const timer = window.setInterval(() => void loadHistory(), 2000);
+    return () => window.clearInterval(timer);
+  }, [jobs, loadHistory]);
 
   async function deleteHistoryJob(job: HistoryJob) {
     const shouldDelete = window.confirm(
@@ -65,7 +76,7 @@ export default function HistoryPage() {
         </span>
       }
     >
-      <HistoryPanel jobs={jobs} deletingJobId={deletingJobId} onDelete={deleteHistoryJob} />
+      <HistoryPanel jobs={jobs} deletingJobId={deletingJobId} onDelete={deleteHistoryJob} onReviewSaved={() => void loadHistory()} />
     </StudioPageShell>
   );
 }

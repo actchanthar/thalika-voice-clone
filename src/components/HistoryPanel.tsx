@@ -1,7 +1,8 @@
 "use client";
 
-import { Clock3, Download, ExternalLink, Pause, Play, Trash2, Volume2 } from "lucide-react";
+import { CheckCircle2, Clock3, Download, ExternalLink, Pause, Play, Save, Star, Trash2, Volume2, X } from "lucide-react";
 import { useRef, useState } from "react";
+import type { ListeningReview } from "@/lib/types";
 
 interface HistoryJob {
   id: string;
@@ -12,12 +13,17 @@ interface HistoryJob {
   createdAt: string;
   audioFile?: string;
   status: string;
+  completedChunks?: number;
+  totalChunks?: number;
+  progressMessage?: string;
+  review?: ListeningReview;
 }
 
 interface HistoryPanelProps {
   jobs: HistoryJob[];
   deletingJobId?: string;
   onDelete: (job: HistoryJob) => void;
+  onReviewSaved?: () => void;
 }
 
 function formatTime(seconds: number) {
@@ -150,7 +156,33 @@ function HistoryAudioPlayer({ filename }: { filename: string }) {
   );
 }
 
-export function HistoryPanel({ jobs, deletingJobId, onDelete }: HistoryPanelProps) {
+export function HistoryPanel({ jobs, deletingJobId, onDelete, onReviewSaved }: HistoryPanelProps) {
+  const [reviewJob, setReviewJob] = useState<HistoryJob | undefined>();
+  const [review, setReview] = useState({ speakerSimilarity: 4, burmesePronunciation: 4, naturalness: 4, noise: 4, approval: "review_needed" as "approved" | "review_needed", notes: "" });
+  const [reviewError, setReviewError] = useState("");
+
+  function openReview(job: HistoryJob) {
+    setReviewJob(job);
+    setReviewError("");
+    setReview(job.review ? { speakerSimilarity: job.review.speakerSimilarity, burmesePronunciation: job.review.burmesePronunciation, naturalness: job.review.naturalness, noise: job.review.noise, approval: job.review.approval, notes: job.review.notes || "" } : { speakerSimilarity: 4, burmesePronunciation: 4, naturalness: 4, noise: 4, approval: "review_needed", notes: "" });
+  }
+
+  async function saveReview() {
+    if (!reviewJob) return;
+    const response = await fetch(`/api/history/${encodeURIComponent(reviewJob.id)}/review`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(review)
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      setReviewError(data.error || "Could not save listening QA.");
+      return;
+    }
+    setReviewJob(undefined);
+    onReviewSaved?.();
+  }
+
   return (
     <section className="studio-card-bg rounded-[2.2rem] border border-white/10 p-5">
       <div className="mb-4 flex items-center justify-between gap-3">
@@ -179,7 +211,16 @@ export function HistoryPanel({ jobs, deletingJobId, onDelete }: HistoryPanelProp
               <div className="flex items-center gap-2">
                 <span className="rounded-full border border-studio-border px-2 py-1 text-xs text-studio-muted">
                   {job.status}
+                  {job.status === "generating" && job.totalChunks ? ` ${job.completedChunks || 0}/${job.totalChunks}` : ""}
                 </span>
+                <span className={`rounded-full border px-2 py-1 text-xs ${job.review?.approval === "approved" ? "border-emerald-300 text-emerald-700" : "border-amber-300 text-amber-700"}`}>
+                  {job.review ? `${job.review.overallScore}/100 ${job.review.approval === "approved" ? "approved" : "review needed"}` : "review needed"}
+                </span>
+                {job.audioFile && (
+                  <button type="button" onClick={() => openReview(job)} className="inline-flex items-center gap-1 rounded-full border border-studio-border px-2 py-1 text-xs font-semibold text-studio-text">
+                    <Star size={13} /> Review
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => onDelete(job)}
@@ -191,11 +232,42 @@ export function HistoryPanel({ jobs, deletingJobId, onDelete }: HistoryPanelProp
                   {deletingJobId === job.id ? "Deleting" : "Delete"}
                 </button>
               </div>
+              {job.status === "generating" && job.progressMessage && <p className="text-xs text-studio-muted">{job.progressMessage}</p>}
             </div>
             {job.audioFile && <HistoryAudioPlayer filename={job.audioFile} />}
           </article>
         ))}
       </div>
+      {reviewJob && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/30 px-4 backdrop-blur-sm">
+          <section role="dialog" aria-modal="true" className="studio-card-bg w-full max-w-lg rounded-[2rem] border border-white/10 p-5 shadow-2xl">
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div><h2 className="text-lg font-semibold text-studio-text">Listening QA</h2><p className="text-sm text-studio-muted">Score the generated voice after listening.</p></div>
+              <button type="button" onClick={() => setReviewJob(undefined)} aria-label="Close listening QA" className="grid h-9 w-9 place-items-center rounded-xl border border-white/10 text-studio-muted"><X size={16} /></button>
+            </div>
+            <div className="grid gap-3">
+              {([
+                ["speakerSimilarity", "Speaker similarity"],
+                ["burmesePronunciation", "Burmese pronunciation"],
+                ["naturalness", "Naturalness"],
+                ["noise", "Clean audio"]
+              ] as const).map(([key, label]) => (
+                <label key={key} className="grid gap-2 text-sm font-medium text-studio-muted">
+                  <span className="flex justify-between"><span>{label}</span><strong className="text-studio-text">{review[key]}/5</strong></span>
+                  <input type="range" min="1" max="5" step="1" value={review[key]} onChange={(event) => setReview((value) => ({ ...value, [key]: Number(event.target.value) }))} className="accent-studio-accent" />
+                </label>
+              ))}
+              <label className="studio-control-bg flex items-center justify-between rounded-2xl border border-white/10 px-3 py-3 text-sm text-studio-muted">
+                <span className="inline-flex items-center gap-2"><CheckCircle2 size={15} /> Approve for production</span>
+                <input type="checkbox" checked={review.approval === "approved"} onChange={(event) => setReview((value) => ({ ...value, approval: event.target.checked ? "approved" : "review_needed" }))} className="h-4 w-4 accent-studio-accent" />
+              </label>
+              <textarea value={review.notes} onChange={(event) => setReview((value) => ({ ...value, notes: event.target.value }))} maxLength={1000} placeholder="Optional notes..." className="studio-control-bg min-h-20 rounded-2xl border border-white/10 px-3 py-3 text-sm text-studio-text" />
+              {reviewError && <p className="text-sm text-red-600">{reviewError}</p>}
+              <button type="button" onClick={() => void saveReview()} className="inline-flex items-center justify-center gap-2 rounded-2xl bg-studio-accent px-4 py-3 text-sm font-semibold text-white"><Save size={15} /> Save Listening QA</button>
+            </div>
+          </section>
+        </div>
+      )}
     </section>
   );
 }

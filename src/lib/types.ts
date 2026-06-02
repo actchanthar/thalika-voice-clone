@@ -1,10 +1,10 @@
-export type VoiceProvider = "mock" | "voxcpm2" | "burmese_production";
-export type OutputFormat = "wav";
+export type VoiceProvider = "voxcpm2" | "burmese_production";
+export type OutputFormat = "wav" | "mp3";
 export type VoiceEmotion = "neutral" | "calm" | "energetic" | "dramatic";
 export type CloneMode = "balanced" | "high_fidelity";
-export type JobStatus = "completed" | "failed";
+export type JobStatus = "generating" | "completed" | "failed";
 export type LanguageCode = "unknown" | "my" | "en" | "zh" | "ja" | "ko" | "yue" | "de" | "fr" | "ru" | "pt" | "es" | "it" | "mixed_supported";
-export type CapabilityLevel = "mock" | "demo" | "baseline" | "production";
+export type CapabilityLevel = "demo" | "baseline" | "production";
 
 export interface LanguageDetectionResult {
   code: LanguageCode;
@@ -16,9 +16,9 @@ export interface LanguageDetectionResult {
 export interface ProviderCapability {
   provider: VoiceProvider;
   name: string;
-  inference: "local_mock" | "remote_hf" | "placeholder";
+  inference: "remote_hf" | "placeholder";
   cloneQuality: CapabilityLevel;
-  privacy: "local" | "remote_public";
+  privacy: "remote_public";
   statusLabel?: string;
   supportedLanguages: LanguageCode[];
   supportedLanguageLabels: string[];
@@ -51,6 +51,63 @@ export interface ReferenceAudioAssessment {
   message: string;
 }
 
+export interface ReferenceQualityReport {
+  durationSeconds: number;
+  silenceRatio: number;
+  clippingRatio: number;
+  rms: number;
+  peak: number;
+  score: number;
+  status: "pass" | "warn" | "block";
+  issues: string[];
+}
+
+export interface BurmeseLexiconEntry {
+  source: string;
+  spoken: string;
+  note?: string;
+}
+
+export interface BurmeseNormalizationChange {
+  source: string;
+  spoken: string;
+  reason: string;
+}
+
+export interface BurmeseNormalizationResult {
+  originalScript: string;
+  normalizedScript: string;
+  changes: BurmeseNormalizationChange[];
+  lexiconRevision: string;
+}
+
+export interface VoiceProfileSummary {
+  id: string;
+  name: string;
+  consentedAt: string;
+  referenceFilename: string;
+  referenceSize: number;
+  referenceText: string;
+  qualityReport: ReferenceQualityReport;
+  preferredCloneMode: CloneMode;
+  preferredCloneStrength: number;
+  preferredDenoiseReference: boolean;
+  preferredNormalizeText: boolean;
+  createdAt: string;
+}
+
+export interface ListeningReview {
+  jobId: string;
+  speakerSimilarity: number;
+  burmesePronunciation: number;
+  naturalness: number;
+  noise: number;
+  overallScore: number;
+  approval: "approved" | "review_needed";
+  notes?: string;
+  updatedAt: string;
+}
+
 export interface GenerateVoiceRequest {
   title?: string;
   script: string;
@@ -64,11 +121,23 @@ export interface GenerateVoiceRequest {
   normalizeText?: boolean;
   referenceAudio?: ReferenceAudioPayload;
   referenceText?: string;
+  voiceProfileId?: string;
+  referenceQualityReport?: ReferenceQualityReport;
+  approvedNormalizedScript?: string;
+  lexiconRevision?: string;
+  normalizationApproved?: boolean;
 }
 
 export interface GenerateVoiceInput extends GenerateVoiceRequest {
   jobId: string;
   scriptId: string;
+  onProgress?: (progress: GenerationProgress) => Promise<void>;
+}
+
+export interface GenerationProgress {
+  completedChunks: number;
+  totalChunks: number;
+  message: string;
 }
 
 export interface GenerateVoiceResult {
@@ -92,13 +161,22 @@ export interface JobRecord {
   id: string;
   scriptId: string;
   title: string;
-  provider: VoiceProvider;
+  provider: string;
   format: OutputFormat;
   speed: number;
   emotion: VoiceEmotion;
   status: JobStatus;
   audioFile?: string;
   error?: string;
+  completedChunks?: number;
+  totalChunks?: number;
+  progressMessage?: string;
+  voiceProfileId?: string;
+  lexiconRevision?: string;
+  normalizationChanges?: number;
+  referenceQualityScore?: number;
+  referenceTranscriptUsed?: boolean;
+  review?: ListeningReview;
   createdAt: string;
   content: string;
 }
