@@ -406,6 +406,57 @@ const MASTER_MAX_GAIN = 6;
 // Skip very long files to keep this in-memory pass bounded (~25 min at the master format).
 const MASTER_MAX_DATA_BYTES = 256 * 1024 * 1024;
 
+// A chunk counts as voiced above this fraction of its own peak (~ -36 dBFS relative).
+const SILENCE_THRESHOLD_RATIO = 0.015;
+// Always keep this much audio around the voiced region so a soft onset/tail is never clipped.
+const SILENCE_GUARD_MILLISECONDS = 25;
+
+// Trim leading/trailing near-silence from one 24-bit chunk so the only inter-chunk gap is the
+// controlled punctuation pause (VoxCPM pads each chunk with variable silence → choppy rhythm).
+// Conservative by design: a per-chunk relative threshold plus a guard margin, so worst case it
+// trims slightly less, never into speech.
+export async function trimSilenceEdges(filePath: string) {
+  const wav = await parsePcmWavFile(filePath);
+  const bytesPerSample = wav.bitsPerSample / 8;
+  if (bytesPerSample !== 3 || wav.dataSize === 0) return;
+
+  const handle = await fs.open(filePath, "r");
+  let data: Buffer;
+  try {
+    data = Buffer.alloc(wav.dataSize);
+    const { bytesRead } = await handle.read(data, 0, wav.dataSize, wav.dataStart);
+    if (bytesRead !== wav.dataSize) return;
+  } finally {
+    await handle.close();
+  }
+
+  const sampleCount = Math.floor(wav.dataSize / bytesPerSample);
+  if (sampleCount === 0) return;
+
+  let peak = 0;
+  for (let i = 0; i < sampleCount; i += 1) {
+    const magnitude = Math.abs(data.readIntLE(i * bytesPerSample, bytesPerSample));
+    if (magnitude > peak) peak = magnitude;
+  }
+  if (peak === 0) return; // entirely silent — leave it for the merge/pause logic
+
+  const threshold = peak * SILENCE_THRESHOLD_RATIO;
+  let first = 0;
+  while (first < sampleCount && Math.abs(data.readIntLE(first * bytesPerSample, bytesPerSample)) <= threshold) first += 1;
+  let last = sampleCount - 1;
+  while (last > first && Math.abs(data.readIntLE(last * bytesPerSample, bytesPerSample)) <= threshold) last -= 1;
+  if (first >= last) return;
+
+  const guard = Math.round((wav.sampleRate * SILENCE_GUARD_MILLISECONDS) / 1000);
+  const start = Math.max(0, first - guard);
+  const end = Math.min(sampleCount, last + 1 + guard);
+  if (start === 0 && end === sampleCount) return; // nothing to trim
+
+  const trimmed = data.subarray(start * bytesPerSample, end * bytesPerSample);
+  const header = createPcmWavHeader(wav, trimmed.length);
+  await fs.writeFile(filePath, Buffer.concat([header, trimmed]));
+}
+
 // Peak-normalize a finished 24-bit master in place and apply tiny edge fades. Both operations are
 // purely multiplicative, so inserted silence stays silent and no sample can exceed the target.
 export async function normalizeMasterPeak(filePath: string) {

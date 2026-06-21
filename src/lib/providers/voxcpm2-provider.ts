@@ -5,7 +5,8 @@ import {
   convertRemoteAudioToPcm24Wav,
   getPunctuationAwarePauseMilliseconds,
   mergeWavFiles,
-  normalizeMasterPeak
+  normalizeMasterPeak,
+  trimSilenceEdges
 } from "../audio-utils";
 import { ensureDataDirs, idStamp, outputsDir, safeJoin, sanitizeFilename } from "../file-utils";
 import { REMOTE_TTS_CHUNK_CHARACTERS } from "../script-limits";
@@ -349,6 +350,9 @@ async function generateRemote(input: GenerateVoiceInput) {
       }
       const chunkPath = path.join(temporaryDir, `chunk-${chunkIndex}.wav`);
       await fs.writeFile(chunkPath, converted.wav);
+      // Trim VoxCPM's variable edge silence so the only inter-chunk gap is the controlled
+      // punctuation pause applied during merge (steadier rhythm, no dead air at start/end).
+      await trimSilenceEdges(chunkPath);
       audioChunkPaths.push(chunkPath);
       remoteFormats.add(converted.remoteFormat);
       await appendGenerationLog("chunk_completed", {
