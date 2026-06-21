@@ -141,6 +141,7 @@ export async function generateVoice(input: GenerateVoiceRequest): Promise<Genera
       format: audio.format,
       status: "completed",
       audioFile: audio.filename,
+      rawAudioFile: audio.rawAudioFile,
       createdAt,
       content: formatJobContent(provider.name, audio)
     });

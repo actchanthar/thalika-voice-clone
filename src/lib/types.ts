@@ -145,6 +145,8 @@ export interface GenerateVoiceResult {
   audioFilePath: string;
   format: OutputFormat;
   localAudioUrl?: string;
+  // Optional un-mastered sibling output kept only when THALIKA_KEEP_RAW_OUTPUT is set, for A/B QA.
+  rawAudioFile?: string;
   metadata?: Record<string, string | number | boolean>;
 }
 
@@ -167,6 +169,7 @@ export interface JobRecord {
   emotion: VoiceEmotion;
   status: JobStatus;
   audioFile?: string;
+  rawAudioFile?: string;
   error?: string;
   completedChunks?: number;
   totalChunks?: number;

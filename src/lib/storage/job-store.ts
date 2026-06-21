@@ -25,6 +25,7 @@ export async function saveJob(record: Omit<JobRecord, "createdAt"> & { createdAt
       emotion: job.emotion,
       status: job.status,
       audioFile: job.audioFile,
+      rawAudioFile: job.rawAudioFile,
       error: job.error,
       completedChunks: job.completedChunks,
       totalChunks: job.totalChunks,
@@ -58,6 +59,7 @@ export async function listJobs(limit = 20) {
         emotion: (parsed.frontmatter.emotion || "neutral") as VoiceEmotion,
         status: parsed.frontmatter.status === "failed" ? "failed" : parsed.frontmatter.status === "generating" ? "generating" : "completed",
         audioFile: parsed.frontmatter.audioFile,
+        rawAudioFile: parsed.frontmatter.rawAudioFile,
         error: parsed.frontmatter.error,
         completedChunks: toNumber(parsed.frontmatter.completedChunks, 0),
         totalChunks: toNumber(parsed.frontmatter.totalChunks, 0),
@@ -88,31 +90,34 @@ export async function deleteJob(jobId: string) {
   const markdown = await fs.readFile(jobFilePath, "utf8");
   const parsed = parseMarkdown(markdown);
   const audioFile = parsed.frontmatter.audioFile;
+  const rawAudioFile = parsed.frontmatter.rawAudioFile;
 
   await fs.unlink(jobFilePath);
   await deleteListeningReview(jobId);
 
-  let audioDeleted = false;
-  if (audioFile) {
-    // Resolve the path defensively: a malformed legacy audioFile would make safeJoin throw,
-    // and that must not fail the whole delete after the job record is already gone.
-    let audioPath: string | undefined;
+  // Best-effort: resolve defensively (a malformed legacy filename would make safeJoin throw) and
+  // ignore ENOENT, so a missing/odd audio reference can't fail the delete after the record is gone.
+  const deleteOutput = async (filename: string | undefined) => {
+    if (!filename) return false;
+    let outputPath: string | undefined;
     try {
-      audioPath = safeJoin(outputsDir, audioFile);
+      outputPath = safeJoin(outputsDir, filename);
     } catch {
-      audioPath = undefined;
+      return false;
     }
-    if (audioPath) {
-      try {
-        await fs.unlink(audioPath);
-        audioDeleted = true;
-      } catch (error) {
-        if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
-          throw error;
-        }
+    try {
+      await fs.unlink(outputPath);
+      return true;
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+        throw error;
       }
+      return false;
     }
-  }
+  };
+
+  const audioDeleted = await deleteOutput(audioFile);
+  await deleteOutput(rawAudioFile);
 
   return {
     jobId,

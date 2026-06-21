@@ -12,6 +12,7 @@ interface HistoryJob {
   format: string;
   createdAt: string;
   audioFile?: string;
+  rawAudioFile?: string;
   status: string;
   completedChunks?: number;
   totalChunks?: number;
@@ -239,7 +240,18 @@ export function HistoryPanel({ jobs, deletingJobId, onDelete, onReviewSaved }: H
               </div>
               {job.status === "generating" && job.progressMessage && <p className="text-xs text-studio-muted">{job.progressMessage}</p>}
             </div>
-            {job.audioFile && <HistoryAudioPlayer filename={job.audioFile} />}
+            {job.audioFile && (
+              <div className="flex flex-col gap-2">
+                {job.rawAudioFile && <p className="text-xs font-medium text-studio-muted">Mastered</p>}
+                <HistoryAudioPlayer filename={job.audioFile} />
+                {job.rawAudioFile && (
+                  <>
+                    <p className="text-xs font-medium text-studio-muted">Raw (un-mastered) — A/B</p>
+                    <HistoryAudioPlayer filename={job.rawAudioFile} />
+                  </>
+                )}
+              </div>
+            )}
           </article>
         ))}
       </div>

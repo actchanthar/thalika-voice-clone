@@ -61,6 +61,12 @@ function parseExtraGenerateParams(): unknown[] {
   }
 }
 
+// QA flag: keep an un-mastered raw sibling output for A/B comparison in History.
+function keepRawOutput() {
+  const value = process.env.THALIKA_KEEP_RAW_OUTPUT?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
+}
+
 function decodeReferenceAudio(referenceAudio: ReferenceAudioPayload) {
   const match = referenceAudio.dataUrl.match(/^data:(audio\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
   if (!match) {
@@ -350,9 +356,6 @@ async function generateRemote(input: GenerateVoiceInput) {
       }
       const chunkPath = path.join(temporaryDir, `chunk-${chunkIndex}.wav`);
       await fs.writeFile(chunkPath, converted.wav);
-      // Trim VoxCPM's variable edge silence so the only inter-chunk gap is the controlled
-      // punctuation pause applied during merge (steadier rhythm, no dead air at start/end).
-      await trimSilenceEdges(chunkPath);
       audioChunkPaths.push(chunkPath);
       remoteFormats.add(converted.remoteFormat);
       await appendGenerationLog("chunk_completed", {
@@ -383,16 +386,36 @@ async function generateRemote(input: GenerateVoiceInput) {
       encoding: "pcm_s24le",
       pausesMilliseconds: punctuationAwarePauses.join(",")
     });
-    await mergeWavFiles(audioChunkPaths, audioFilePath, punctuationAwarePauses);
-    // Master the merged take: peak-normalize to a consistent level and fade the edges. Only new
+
+    // QA-only: when THALIKA_KEEP_RAW_OUTPUT is set, keep an un-mastered sibling merged from the
+    // SAME chunks (no trim, no normalize) so History can A/B the mastering on identical content.
+    let rawAudioFile: string | undefined;
+    if (keepRawOutput()) {
+      rawAudioFile = sanitizeFilename(`${outputStem}_raw.wav`);
+      await mergeWavFiles([...audioChunkPaths], safeJoin(outputsDir, rawAudioFile), punctuationAwarePauses);
+    }
+
+    // Trim each chunk's edge silence, then merge so the only inter-chunk gap is the controlled
+    // punctuation pause (steadier rhythm), then master (peak-normalize + edge fades). Only new
     // generations are mastered — legacy-file migration must not re-level existing user audio.
+    for (const chunkPath of audioChunkPaths) {
+      await trimSilenceEdges(chunkPath);
+    }
+    await mergeWavFiles(audioChunkPaths, audioFilePath, punctuationAwarePauses);
     await normalizeMasterPeak(audioFilePath);
-    await appendGenerationLog("generation_completed", { jobId: input.jobId, chunks: chunks.length, filename, format });
+    await appendGenerationLog("generation_completed", {
+      jobId: input.jobId,
+      chunks: chunks.length,
+      filename,
+      format,
+      rawCopy: Boolean(rawAudioFile)
+    });
     result = {
       filename,
       audioFilePath,
       format,
       localAudioUrl: `/api/audio/${filename}`,
+      rawAudioFile,
       metadata: {
         remoteProvider: "huggingface-space",
         remoteBaseUrl: baseUrl,
