@@ -1,4 +1,4 @@
-export type VoiceProvider = "voxcpm2" | "burmese_production";
+export type VoiceProvider = "voxcpm2";
 export type OutputFormat = "wav" | "mp3";
 export type VoiceEmotion = "neutral" | "calm" | "energetic" | "dramatic";
 export type CloneMode = "balanced" | "high_fidelity";

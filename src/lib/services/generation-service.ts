@@ -1,4 +1,5 @@
 import { localIsoString } from "@/lib/file-utils";
+import { detectScriptLanguage } from "@/lib/language-utils";
 import { normalizeBurmeseScript } from "@/lib/burmese-normalizer";
 import { preflightProvider } from "@/lib/provider-capabilities";
 import { getProvider } from "@/lib/providers";
@@ -50,10 +51,7 @@ export async function generateVoice(input: GenerateVoiceRequest): Promise<Genera
       referenceQualityReport: effectiveInput.referenceQualityReport || saved.profile.qualityReport
     };
   }
-  if (
-    (effectiveInput.provider === "voxcpm2" || effectiveInput.provider === "burmese_production") &&
-    !effectiveInput.referenceText?.trim()
-  ) {
+  if (!effectiveInput.referenceText?.trim()) {
     // Server-side backstop after profile backfill: VoxCPM echoes the reference audio tail when
     // prompt_text is empty (worst on short scripts). Block any clone — including legacy profiles
     // saved without a transcript — that would otherwise reach inference with no prompt_text.
@@ -62,14 +60,19 @@ export async function generateVoice(input: GenerateVoiceRequest): Promise<Genera
         "Voice cloning requires the exact reference transcript. Add the transcript to this voice profile or paste the words spoken in the reference audio."
     });
   }
-  if (effectiveInput.provider === "burmese_production" && effectiveInput.referenceQualityReport?.status === "block") {
+
+  // Burmese scripts get the production QA layer (pronunciation normalization + approval gate +
+  // reference-quality block) automatically — keyed on the detected language, not a provider.
+  const isBurmeseScript = detectScriptLanguage(effectiveInput.script).code === "my";
+
+  if (isBurmeseScript && effectiveInput.referenceQualityReport?.status === "block") {
     throw new RemoteProviderError("Blocked reference audio", {
       publicMessage: "Reference audio quality is blocked. Upload a cleaner voice sample."
     });
   }
 
   let normalizationChanges = 0;
-  if (effectiveInput.provider === "burmese_production") {
+  if (isBurmeseScript) {
     const lexicon = await readBurmeseLexicon();
     const normalized = normalizeBurmeseScript(effectiveInput.script, lexicon.entries, lexicon.revision);
     if (

@@ -10,6 +10,7 @@ import { StudioPageShell } from "@/components/StudioPageShell";
 import { VoiceSettings, type ProviderHealth } from "@/components/VoiceSettings";
 import { NormalizationApprovalPanel } from "@/components/NormalizationApprovalPanel";
 import { analyzeReferenceAudio } from "@/lib/browser-reference-audio";
+import { detectScriptLanguage } from "@/lib/language-utils";
 import { preflightProvider } from "@/lib/provider-capabilities";
 import { MAX_SCRIPT_CHARACTERS } from "@/lib/script-limits";
 import type {
@@ -38,7 +39,7 @@ interface VoiceOverDraft {
 export default function Home() {
   const [title, setTitle] = useState("");
   const [script, setScript] = useState("");
-  const [provider, setProvider] = useState<VoiceProvider>("burmese_production");
+  const [provider] = useState<VoiceProvider>("voxcpm2");
   const [speed, setSpeed] = useState(1);
   const [emotion, setEmotion] = useState<VoiceEmotion>("calm");
   const [cloneMode, setCloneMode] = useState<CloneMode>("high_fidelity");
@@ -63,6 +64,10 @@ export default function Home() {
   const [providerHealthLoading, setProviderHealthLoading] = useState(false);
   const [draftReady, setDraftReady] = useState(false);
   const loadedDraftRef = useRef(false);
+
+  // Burmese scripts automatically get the production QA layer (pronunciation normalization +
+  // approval gate). The trigger is the detected language, not a separate provider selection.
+  const isBurmeseScript = useMemo(() => detectScriptLanguage(script).code === "my", [script]);
 
   useEffect(() => {
     async function loadDraft() {
@@ -96,7 +101,7 @@ export default function Home() {
   }, [loadProfiles]);
 
   const refreshNormalization = useCallback(async () => {
-    if (provider !== "burmese_production" || script.trim().length < 10) {
+    if (detectScriptLanguage(script).code !== "my" || script.trim().length < 10) {
       setNormalization(undefined);
       setNormalizationApproved(false);
       return;
@@ -116,7 +121,7 @@ export default function Home() {
     } finally {
       setNormalizationLoading(false);
     }
-  }, [provider, script]);
+  }, [script]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => void refreshNormalization(), 450);
@@ -168,13 +173,8 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (provider !== "voxcpm2" && provider !== "burmese_production") {
-      setProviderHealth(undefined);
-      return;
-    }
-
     void refreshProviderHealth();
-  }, [provider, refreshProviderHealth]);
+  }, [refreshProviderHealth]);
 
   const scriptError = useMemo(() => {
     const trimmed = script.trim();
@@ -332,32 +332,21 @@ export default function Home() {
 
   const isGenerating = status === "saving" || status === "generating";
   const referenceRequirementError =
-    provider === "burmese_production"
-      ? referenceAudioError ||
-        (!referenceAudio && !selectedProfileId
-          ? "Burmese production cloning requires clean reference voice data."
-          : referenceAudio?.durationSeconds && referenceAudio.durationSeconds < 3
-            ? "Reference audio is too short. Use at least 3 seconds, ideally 6-15 seconds."
-            : referenceAudio?.durationSeconds && referenceAudio.durationSeconds > 50
-              ? "Reference audio is too long for VoxCPM2. Trim it to 6-30 seconds of clean speech."
-              : "")
-      : provider === "voxcpm2"
-        ? referenceAudioError ||
-          (!referenceAudio && !selectedProfileId
-            ? "VoxCPM2 requires reference audio for voice cloning."
-            : referenceAudio?.durationSeconds && referenceAudio.durationSeconds < 3
-              ? "Reference audio is too short. Use at least 3 seconds, ideally 6-15 seconds."
-              : referenceAudio?.durationSeconds && referenceAudio.durationSeconds > 50
-                ? "Reference audio is too long for VoxCPM2. Trim it to 6-30 seconds of clean speech."
-                : "")
-      : referenceAudioError;
+    referenceAudioError ||
+    (!referenceAudio && !selectedProfileId
+      ? "VoxCPM2 requires reference audio for voice cloning."
+      : referenceAudio?.durationSeconds && referenceAudio.durationSeconds < 3
+        ? "Reference audio is too short. Use at least 3 seconds, ideally 6-15 seconds."
+        : referenceAudio?.durationSeconds && referenceAudio.durationSeconds > 50
+          ? "Reference audio is too long for VoxCPM2. Trim it to 6-30 seconds of clean speech."
+          : "");
   const generateDisabled =
     Boolean(scriptError) ||
     isGenerating ||
-    ((provider === "voxcpm2" || provider === "burmese_production") &&
-      ((!referenceAudio && !selectedProfileId) || Boolean(referenceRequirementError))) ||
-    (provider === "voxcpm2" && !referenceText.trim() && !selectedProfileId) ||
-    (provider === "burmese_production" && (referenceQualityReport?.status === "block" || !referenceText.trim() || !normalizationApproved));
+    (!referenceAudio && !selectedProfileId) ||
+    Boolean(referenceRequirementError) ||
+    (!referenceText.trim() && !selectedProfileId) ||
+    (isBurmeseScript && (referenceQualityReport?.status === "block" || !normalizationApproved));
   const activePreflight: ProviderPreflightResult = preflightProvider({ provider, script, referenceAudio, voiceProfileId: selectedProfileId || undefined, referenceText, normalizationApproved, cloneMode });
   const capabilityDisabled = !activePreflight.ok;
   const disabledReason =
@@ -412,7 +401,7 @@ export default function Home() {
               onTitleChange={setTitle}
               onScriptChange={setScript}
             />
-            {provider === "burmese_production" && (
+            {isBurmeseScript && (
               <NormalizationApprovalPanel result={normalization} loading={normalizationLoading} approved={normalizationApproved} onRefresh={() => void refreshNormalization()} onApprove={() => setNormalizationApproved(true)} />
             )}
           </div>
@@ -434,7 +423,6 @@ export default function Home() {
               referenceAudioError={referenceRequirementError}
               providerHealth={providerHealth}
               providerHealthLoading={providerHealthLoading}
-              onProviderChange={setProvider}
               onSpeedChange={setSpeed}
               onEmotionChange={setEmotion}
               onCloneModeChange={setCloneMode}

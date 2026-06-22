@@ -31,7 +31,6 @@ interface VoiceSettingsProps {
   referenceAudioError?: string;
   providerHealth?: ProviderHealth;
   providerHealthLoading?: boolean;
-  onProviderChange: (value: VoiceProvider) => void;
   onSpeedChange: (value: number) => void;
   onEmotionChange: (value: VoiceEmotion) => void;
   onCloneModeChange: (value: CloneMode) => void;
@@ -79,7 +78,6 @@ export function VoiceSettings({
   referenceAudioError,
   providerHealth,
   providerHealthLoading = false,
-  onProviderChange,
   onSpeedChange,
   onEmotionChange,
   onCloneModeChange,
@@ -95,7 +93,7 @@ export function VoiceSettings({
   onRefreshProviderHealth
 }: VoiceSettingsProps) {
   const referenceAssessment = assessReferenceAudio(referenceAudio);
-  const isCloneProvider = provider === "voxcpm2" || provider === "burmese_production";
+  const isCloneProvider = provider === "voxcpm2";
   const [profileName, setProfileName] = useState("");
   const [profileConsent, setProfileConsent] = useState(false);
   const [lexiconOpen, setLexiconOpen] = useState(false);
@@ -137,45 +135,23 @@ export function VoiceSettings({
         </div>
       </div>
       <div className="mt-5 grid gap-4">
-        <label className="grid gap-2 text-sm font-medium text-studio-muted">
-          Provider
-          <select
-            value={provider}
-            onChange={(event) => onProviderChange(event.target.value as VoiceProvider)}
-            className="studio-control-bg rounded-2xl border border-white/10 px-3 py-3 text-studio-text outline-none focus:border-studio-accent"
-          >
-            <option value="burmese_production">Burmese Production (recommended)</option>
-            <option value="voxcpm2">VoxCPM2 Multilingual</option>
-          </select>
-          {/* <p className="text-xs leading-relaxed text-studio-muted">
-            {provider === "burmese_production"
-              ? "Recommended for Burmese scripts. Uses the shared VoxCPM2 engine with Burmese-only validation."
-              : "Direct VoxCPM2 engine access for supported multilingual scripts."}
-          </p> */}
-        </label>
+        <div className="grid gap-2 text-sm font-medium text-studio-muted">
+          Engine
+          <div className="studio-control-bg rounded-2xl border border-white/10 px-3 py-3 text-studio-text">
+            VoxCPM2 Multilingual
+            <span className="ml-2 text-xs font-normal text-studio-muted">Burmese pronunciation QA applies automatically</span>
+          </div>
+        </div>
 
         {isCloneProvider && (
           <div className="studio-nested-card-bg grid gap-3 rounded-[1.8rem] border border-white/10 p-4">
             <div className="flex flex-wrap items-center gap-2">
-              {provider === "voxcpm2" ? (
-                <>
-                  <span className="inline-flex items-center gap-2 rounded-full border border-studio-accent/30 bg-studio-accent/10 px-3 py-1 text-xs font-semibold text-emerald-800">
-                    <Mic2 size={13} /> VoxCPM2 multilingual inference
-                  </span>
-                  <span className="rounded-full border border-amber-300/45 bg-amber-400/10 px-3 py-1 text-xs font-semibold text-amber-700">
-                    Public shared inference may be slow
-                  </span>
-                </>
-              ) : (
-                <>
-                  <span className="inline-flex items-center gap-2 rounded-full border border-studio-accent/30 bg-studio-accent/10 px-3 py-1 text-xs font-semibold text-emerald-800">
-                    <Mic2 size={13} /> Burmese production preset
-                  </span>
-                  <span className="rounded-full border border-amber-300/45 bg-amber-400/10 px-3 py-1 text-xs font-semibold text-amber-700">
-                    Powered by VoxCPM2 remote inference
-                  </span>
-                </>
-              )}
+              <span className="inline-flex items-center gap-2 rounded-full border border-studio-accent/30 bg-studio-accent/10 px-3 py-1 text-xs font-semibold text-emerald-800">
+                <Mic2 size={13} /> VoxCPM2 multilingual inference
+              </span>
+              <span className="rounded-full border border-amber-300/45 bg-amber-400/10 px-3 py-1 text-xs font-semibold text-amber-700">
+                Public shared inference may be slow
+              </span>
             </div>
 
             <div className="studio-control-bg grid gap-2 rounded-2xl border border-white/10 p-3">
@@ -237,11 +213,7 @@ export function VoiceSettings({
                   })`
                   : selectedProfileId
                     ? "Saved local voice profile selected."
-                    : provider === "voxcpm2"
-                      ? "Upload a clean voice reference for VoxCPM2 cloning."
-                      : provider === "burmese_production"
-                        ? "Upload clean Burmese voice data. This will run through the VoxCPM2 backend."
-                        : "Upload a 3-10 second audio sample for the remote Space.")}
+                    : "Upload a clean voice reference for VoxCPM2 cloning.")}
             </p>
 
             {(referenceAudio || selectedProfileId) && (
@@ -372,11 +344,9 @@ export function VoiceSettings({
         </label>
       </div>
 
-      {provider === "burmese_production" && (
-        <button type="button" onClick={() => setLexiconOpen(true)} className="studio-soft-chip-bg mt-4 inline-flex items-center gap-2 rounded-full border border-white/10 px-3 py-2 text-xs font-semibold text-studio-text">
-          <Settings size={14} /> Burmese Pronunciation Lexicon
-        </button>
-      )}
+      <button type="button" onClick={() => setLexiconOpen(true)} className="studio-soft-chip-bg mt-4 inline-flex items-center gap-2 rounded-full border border-white/10 px-3 py-2 text-xs font-semibold text-studio-text">
+        <Settings size={14} /> Burmese Pronunciation Lexicon
+      </button>
 
       {lexiconOpen && (
         <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/30 px-4 backdrop-blur-sm">

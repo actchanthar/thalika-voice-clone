@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { MAX_SCRIPT_CHARACTERS } from "./script-limits";
+import { detectScriptLanguage } from "./language-utils";
 
 const referenceAudioSchema = z.object({
   dataUrl: z.string().startsWith("data:audio/", "Reference audio must be an audio data URL"),
@@ -28,7 +29,7 @@ export const generateRequestSchema = z
       .trim()
       .min(10, "Script must be at least 10 characters")
       .max(MAX_SCRIPT_CHARACTERS, `Script must be ${MAX_SCRIPT_CHARACTERS.toLocaleString()} characters or fewer`),
-    provider: z.enum(["voxcpm2", "burmese_production"]),
+    provider: z.enum(["voxcpm2"]),
     format: z.literal("wav"),
     speed: z.number().min(0.8, "Speed must be at least 0.8").max(1.2, "Speed must be at most 1.2"),
     emotion: z.enum(["neutral", "calm", "energetic", "dramatic"]),
@@ -45,25 +46,18 @@ export const generateRequestSchema = z
     normalizationApproved: z.boolean().optional()
   })
   .superRefine((value, context) => {
-    if (value.provider === "burmese_production" && !value.referenceAudio && !value.voiceProfileId) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["referenceAudio"],
-        message: "Burmese production cloning requires clean reference voice data"
-      });
-    }
-    if (value.provider === "voxcpm2" && !value.referenceAudio && !value.voiceProfileId) {
+    // Burmese scripts get the production QA layer (normalization approval + reference-quality
+    // gate) automatically — the trigger is the detected language, not a separate provider.
+    const isBurmeseScript = detectScriptLanguage(value.script).code === "my";
+
+    if (!value.referenceAudio && !value.voiceProfileId) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["referenceAudio"],
         message: "VoxCPM2 requires reference audio for voice cloning"
       });
     }
-    if (
-      (value.provider === "burmese_production" || value.provider === "voxcpm2") &&
-      !value.referenceText?.trim() &&
-      !value.voiceProfileId
-    ) {
+    if (!value.referenceText?.trim() && !value.voiceProfileId) {
       // VoxCPM leaks the reference audio tail into the output when prompt_text is empty
       // (worst on short scripts), regardless of clone mode. Every clone must send the exact
       // transcript. A saved profile is exempt here only because generation-service backfills
@@ -74,21 +68,21 @@ export const generateRequestSchema = z
         message: "Voice cloning requires the exact reference transcript spoken in the reference audio"
       });
     }
-    if (value.provider === "burmese_production" && (!value.normalizationApproved || !value.approvedNormalizedScript || !value.lexiconRevision)) {
+    if (isBurmeseScript && (!value.normalizationApproved || !value.approvedNormalizedScript || !value.lexiconRevision)) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["normalizationApproved"],
         message: "Review and approve the normalized Burmese script before generation"
       });
     }
-    if (value.provider === "burmese_production" && value.referenceQualityReport?.status === "block") {
+    if (isBurmeseScript && value.referenceQualityReport?.status === "block") {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["referenceQualityReport"],
         message: "Reference audio quality is blocked. Upload a cleaner voice sample"
       });
     }
-    if ((value.provider === "voxcpm2" || value.provider === "burmese_production") && value.referenceAudio?.durationSeconds) {
+    if (value.referenceAudio?.durationSeconds) {
       if (value.referenceAudio.durationSeconds < 3) {
         context.addIssue({
           code: z.ZodIssueCode.custom,
