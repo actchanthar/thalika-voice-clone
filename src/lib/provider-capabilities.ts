@@ -94,16 +94,6 @@ export function preflightProvider(
     };
   }
 
-  if (!input.referenceText?.trim() && !input.voiceProfileId) {
-    return {
-      ok: false,
-      severity: "blocked",
-      detectedLanguage,
-      message: "Voice cloning requires the exact reference transcript.",
-      nextStep: "Paste the words spoken in the uploaded reference audio so short scripts speak the target text instead of echoing the reference."
-    };
-  }
-
   // Burmese scripts run the production QA layer automatically: the normalized pronunciation
   // preview must be approved before generation. Other languages skip this gate.
   if (detectedLanguage.code === "my" && !input.normalizationApproved) {

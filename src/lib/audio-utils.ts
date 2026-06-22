@@ -368,6 +368,13 @@ export async function convertRemoteAudioToPcm24Wav(
   };
 }
 
+// Playback length of a PCM master buffer, used to detect VoxCPM "bad cases" (a take far longer
+// than the text warrants — a repeat or a leaked reference echo) by its chars-per-second.
+export function pcm24DurationSeconds(buffer: Buffer) {
+  const wav = parsePcmWavBuffer(buffer);
+  return wav.byteRate > 0 ? wav.data.length / wav.byteRate : 0;
+}
+
 export function validatePcm24MasterBuffer(buffer: Buffer) {
   const wav = parsePcmWavBuffer(buffer);
 

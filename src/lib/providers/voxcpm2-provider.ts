@@ -6,7 +6,9 @@ import {
   getPunctuationAwarePauseMilliseconds,
   mergeWavFiles,
   normalizeMasterPeak,
-  trimSilenceEdges
+  pcm24DurationSeconds,
+  trimSilenceEdges,
+  type PcmWavConversionResult
 } from "../audio-utils";
 import { ensureDataDirs, idStamp, outputsDir, safeJoin, sanitizeFilename } from "../file-utils";
 import { REMOTE_TTS_CHUNK_CHARACTERS } from "../script-limits";
@@ -106,8 +108,7 @@ async function submitVoxCPM2Generation(
   uploadedReferencePath: string,
   scriptChunk: string,
   chunkIndex: number,
-  chunkCount: number,
-  useReferenceTranscript: boolean
+  chunkCount: number
 ) {
   const cloneMode = input.cloneMode || "high_fidelity";
   // cfg_value: VoxCPM2's documented sweet spot is ~2.0. Higher improves prompt adherence but
@@ -115,7 +116,9 @@ async function submitVoxCPM2Generation(
   const cloneStrength = Math.min(3, Math.max(1, input.cloneStrength ?? (cloneMode === "high_fidelity" ? 2 : 1.7)));
   const denoiseReference = input.denoiseReference ?? false;
   const normalizeText = input.normalizeText ?? true;
-  const referenceText = useReferenceTranscript ? input.referenceText?.trim() || "" : "";
+  // NEVER send prompt_text (use_prompt_text=false): VoxCPM speaks the prompt transcript and
+  // prepends it to the output ("ultimate mode" leak). Audio-only cloning is clean — proven by
+  // direct testing — and means the user never has to type the reference transcript.
   const continuityInstruction =
     chunkCount > 1
       ? ` This is segment ${chunkIndex + 1} of ${chunkCount}; keep the same speaker identity, pace, volume, accent, and emotional style so all segments join naturally.`
@@ -133,8 +136,8 @@ async function submitVoxCPM2Generation(
       mime_type: input.referenceAudio?.mimeType || "audio/wav",
       meta: { _type: "gradio.FileData" }
     },
-    Boolean(referenceText),
-    referenceText,
+    false, // use_prompt_text — always off; see comment above
+    "", // prompt_text — never sent
     cloneStrength,
     normalizeText,
     denoiseReference,
@@ -160,7 +163,7 @@ async function submitVoxCPM2Generation(
     });
   }
 
-  return { eventId: json.event_id, referenceTextRequested: Boolean(referenceText) };
+  return { eventId: json.event_id };
 }
 
 async function fetchVoxCPM2Result(
@@ -168,8 +171,7 @@ async function fetchVoxCPM2Result(
   eventId: string,
   input: GenerateVoiceInput,
   chunkIndex: number,
-  chunkCount: number,
-  referenceTextRequested: boolean
+  chunkCount: number
 ) {
   const { response: resultResponse, text: resultText } = await fetchTextWithTimeout(`${baseUrl}/gradio_api/call/generate/${eventId}`, {
     method: "GET",
@@ -185,7 +187,6 @@ async function fetchVoxCPM2Result(
       jobId: input.jobId,
       chunk: chunkIndex + 1,
       chunks: chunkCount,
-      referenceTranscriptRequested: referenceTextRequested,
       events: JSON.stringify(summarizeRemoteEvents(events)),
       error: diagnosticError(error)
     });
@@ -203,6 +204,24 @@ function shouldRetrySubmit(error: unknown) {
 // capped backoff) so a transient busy window doesn't surface as a hard generation failure.
 // Safe because a rejected submission never enqueued inference — no duplicate-run risk.
 const SUBMIT_RETRY_ATTEMPTS = 5;
+
+// Client-side retry_badcase: VoxCPM occasionally emits a take far longer than the text warrants —
+// a repeated phrase or an echoed reference tail. Detect it by chars-per-second (normal Burmese TTS
+// runs ~8-20 cps; a leaked/repeated take drops well below) and regenerate, keeping the densest take.
+const BADCASE_MAX_RETRIES = 2;
+const BADCASE_MIN_SECONDS = 6; // never second-guess short clips, where cps is noisy
+const BADCASE_MIN_CHARS_PER_SECOND = 4.5;
+
+function charsPerSecond(chunkText: string, wav: Buffer) {
+  const seconds = pcm24DurationSeconds(wav);
+  return seconds > 0 ? chunkText.trim().length / seconds : Infinity;
+}
+
+function isBadCaseTake(chunkText: string, wav: Buffer) {
+  const seconds = pcm24DurationSeconds(wav);
+  if (seconds <= BADCASE_MIN_SECONDS) return false;
+  return charsPerSecond(chunkText, wav) < BADCASE_MIN_CHARS_PER_SECOND;
+}
 
 async function downloadRemoteAudio(audioUrl: string) {
   const response = await fetchWithTimeout(audioUrl, { method: "GET" });
@@ -268,7 +287,6 @@ async function generateRemote(input: GenerateVoiceInput) {
   const outputStem = sanitizeFilename(`voice_${idStamp()}`);
   const temporaryDir = await fs.mkdtemp(path.join(os.tmpdir(), "thalika-voxcpm2-"));
   let result: GenerateVoiceResult | undefined;
-  const referenceTranscriptEnabled = Boolean(input.referenceText?.trim());
 
   try {
     const audioChunkPaths: string[] = [];
@@ -308,57 +326,49 @@ async function generateRemote(input: GenerateVoiceInput) {
         });
       };
 
-      // Stage 1 — enqueue inference. Always send the reference transcript (use_prompt_text=true);
-      // retrying without it makes VoxCPM echo the reference audio tail (dominant on short scripts).
-      // Only retry on 429/503 so an ambiguous timeout never re-enqueues a duplicate inference.
-      const submission = await withRetry(
-        () =>
-          submitVoxCPM2Generation(
-            baseUrl,
-            input,
-            uploadedReferencePath,
-            chunk,
-            chunkIndex,
-            chunks.length,
-            referenceTranscriptEnabled
-          ),
-        shouldRetrySubmit,
-        SUBMIT_RETRY_ATTEMPTS,
-        logStageRetry("submit")
-      );
+      // One full attempt: enqueue (POST, retry 429/503 only — an ambiguous timeout must not
+      // re-enqueue), read the SAME event id (retry safe), download (idempotent), decode to PCM.
+      const produceTake = async (): Promise<PcmWavConversionResult> => {
+        const submission = await withRetry(
+          () => submitVoxCPM2Generation(baseUrl, input, uploadedReferencePath, chunk, chunkIndex, chunks.length),
+          shouldRetrySubmit,
+          SUBMIT_RETRY_ATTEMPTS,
+          logStageRetry("submit")
+        );
+        const remoteAudioUrl = await withRetry(
+          () => fetchVoxCPM2Result(baseUrl, submission.eventId, input, chunkIndex, chunks.length),
+          shouldRetryHFError,
+          2,
+          logStageRetry("result")
+        );
+        const audio = await withRetry(() => downloadRemoteAudio(remoteAudioUrl), shouldRetryHFError, 2, logStageRetry("download"));
+        try {
+          return await convertRemoteAudioToPcm24Wav(audio);
+        } catch {
+          throw new RemoteProviderError("Remote audio decode failed", {
+            publicMessage: "VoxCPM2 returned an audio segment that could not be decoded into PCM WAV."
+          });
+        }
+      };
 
-      // Stage 2 — read the queued job's result. Retrying re-reads the SAME event id (no new
-      // inference), so a slow SSE read or transient drop is safe to retry on timeout.
-      const remoteAudioUrl = await withRetry(
-        () =>
-          fetchVoxCPM2Result(
-            baseUrl,
-            submission.eventId,
-            input,
-            chunkIndex,
-            chunks.length,
-            submission.referenceTextRequested
-          ),
-        shouldRetryHFError,
-        2,
-        logStageRetry("result")
-      );
-
-      // Stage 3 — download the produced file (idempotent GET).
-      const audio = await withRetry(
-        () => downloadRemoteAudio(remoteAudioUrl),
-        shouldRetryHFError,
-        2,
-        logStageRetry("download")
-      );
-      let converted;
-      try {
-        converted = await convertRemoteAudioToPcm24Wav(audio);
-      } catch {
-        throw new RemoteProviderError("Remote audio decode failed", {
-          publicMessage: "VoxCPM2 returned an audio segment that could not be decoded into PCM WAV."
+      // Client-side retry_badcase: if a take runs far longer than the text warrants (a repeat or a
+      // leaked reference echo), regenerate and keep the densest (least-padded) take.
+      let converted = await produceTake();
+      for (let attempt = 1; attempt <= BADCASE_MAX_RETRIES && isBadCaseTake(chunk, converted.wav); attempt += 1) {
+        await appendGenerationLog("chunk_badcase_retry", {
+          jobId: input.jobId,
+          chunk: chunkIndex + 1,
+          chunks: chunks.length,
+          attempt,
+          seconds: pcm24DurationSeconds(converted.wav).toFixed(2),
+          charsPerSecond: charsPerSecond(chunk, converted.wav).toFixed(2)
         });
+        const candidate = await produceTake();
+        if (charsPerSecond(chunk, candidate.wav) > charsPerSecond(chunk, converted.wav)) {
+          converted = candidate;
+        }
       }
+
       const chunkPath = path.join(temporaryDir, `chunk-${chunkIndex}.wav`);
       await fs.writeFile(chunkPath, converted.wav);
       audioChunkPaths.push(chunkPath);
@@ -368,8 +378,9 @@ async function generateRemote(input: GenerateVoiceInput) {
         chunk: chunkIndex + 1,
         chunks: chunks.length,
         remoteFormat: converted.remoteFormat,
-        remoteBytes: audio.length,
-        pcmWavBytes: converted.wav.length
+        pcmWavBytes: converted.wav.length,
+        seconds: pcm24DurationSeconds(converted.wav).toFixed(2),
+        charsPerSecond: charsPerSecond(chunk, converted.wav).toFixed(2)
       });
       await input.onProgress?.({
         completedChunks: chunkIndex + 1,
@@ -435,7 +446,7 @@ async function generateRemote(input: GenerateVoiceInput) {
         cloneStrength: input.cloneStrength ?? 2,
         denoiseReference: input.denoiseReference ?? false,
         normalizeText: input.normalizeText ?? true,
-        referenceTranscriptUsed: Boolean(input.referenceText?.trim()),
+        referenceTranscriptUsed: false,
         paceGuidance: speedControl(input.speed),
         chunkedGeneration: chunks.length > 1,
         chunkCount: chunks.length,

@@ -390,7 +390,6 @@ export default function Home() {
     isGenerating ||
     (!referenceAudio && !selectedProfileId) ||
     Boolean(referenceRequirementError) ||
-    (!referenceText.trim() && !selectedProfileId) ||
     (isBurmeseScript && (referenceQualityReport?.status === "block" || !normalizationApproved));
   const activePreflight: ProviderPreflightResult = preflightProvider({ provider, script, referenceAudio, voiceProfileId: selectedProfileId || undefined, referenceText, normalizationApproved, cloneMode });
   const capabilityDisabled = !activePreflight.ok;

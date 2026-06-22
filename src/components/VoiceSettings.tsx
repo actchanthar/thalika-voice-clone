@@ -232,9 +232,9 @@ export function VoiceSettings({
             )}
 
             <label className="grid gap-2 text-sm font-medium text-studio-muted">
-              Exact reference transcript
-              <textarea value={referenceText} onChange={(event) => onReferenceTextChange(event.target.value)} maxLength={2000} placeholder="Paste the exact words spoken in the reference audio..." className="studio-control-bg min-h-24 rounded-2xl border border-white/10 px-3 py-3 text-studio-text outline-none focus:border-studio-accent" />
-              <span className="text-xs leading-5">Required for Burmese high-fidelity cloning. The transcript is sent with the reference audio to improve similarity.</span>
+              Reference transcript <span className="font-normal text-studio-muted">(optional)</span>
+              <textarea value={referenceText} onChange={(event) => onReferenceTextChange(event.target.value)} maxLength={2000} placeholder="Optional notes — not required to generate..." className="studio-control-bg min-h-24 rounded-2xl border border-white/10 px-3 py-3 text-studio-text outline-none focus:border-studio-accent" />
+              <span className="text-xs leading-5">Optional. Cloning uses the reference audio only — you don&apos;t need to type the transcript, and it is not sent to the model.</span>
             </label>
 
             {referenceAudio && !selectedProfileId && (
@@ -244,7 +244,7 @@ export function VoiceSettings({
                   <input type="checkbox" checked={profileConsent} onChange={(event) => setProfileConsent(event.target.checked)} className="mt-1 h-4 w-4 accent-studio-accent" />
                   Save this consented voice sample and transcript on this device for repeated use.
                 </label>
-                <button type="button" disabled={!profileName.trim() || !profileConsent || !referenceText.trim() || referenceQualityReport?.status === "block"} onClick={() => onProfileSave(profileName, profileConsent)} className="inline-flex items-center justify-center gap-2 rounded-xl bg-studio-accent px-3 py-2 text-sm font-semibold text-white disabled:opacity-45">
+                <button type="button" disabled={!profileName.trim() || !profileConsent || referenceQualityReport?.status === "block"} onClick={() => onProfileSave(profileName, profileConsent)} className="inline-flex items-center justify-center gap-2 rounded-xl bg-studio-accent px-3 py-2 text-sm font-semibold text-white disabled:opacity-45">
                   <Save size={15} /> Save Local Profile
                 </button>
               </div>

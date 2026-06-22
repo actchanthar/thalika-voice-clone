@@ -98,16 +98,6 @@ export async function startVoiceGeneration(input: GenerateVoiceRequest): Promise
       referenceQualityReport: effectiveInput.referenceQualityReport || saved.profile.qualityReport
     };
   }
-  if (!effectiveInput.referenceText?.trim()) {
-    // Server-side backstop after profile backfill: VoxCPM echoes the reference audio tail when
-    // prompt_text is empty (worst on short scripts). Block any clone — including legacy profiles
-    // saved without a transcript — that would otherwise reach inference with no prompt_text.
-    throw new RemoteProviderError("Missing reference transcript", {
-      publicMessage:
-        "Voice cloning requires the exact reference transcript. Add the transcript to this voice profile or paste the words spoken in the reference audio."
-    });
-  }
-
   // Burmese scripts get the production QA layer (pronunciation normalization + approval gate +
   // reference-quality block) automatically — keyed on the detected language, not a provider.
   const isBurmeseScript = detectScriptLanguage(effectiveInput.script).code === "my";
