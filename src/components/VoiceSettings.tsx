@@ -102,12 +102,20 @@ export function VoiceSettings({
   const [endpoint, setEndpoint] = useState("");
   const [endpointSaving, setEndpointSaving] = useState(false);
   const [endpointNote, setEndpointNote] = useState("");
+  const [localStatus, setLocalStatus] = useState({ configured: false, running: false, reachable: false });
+
+  const refreshLocalStatus = () =>
+    fetch("/api/voxcpm-local", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((data) => setLocalStatus(data))
+      .catch(() => undefined);
 
   useEffect(() => {
     void fetch("/api/settings/voxcpm2-endpoint", { cache: "no-store" })
       .then((response) => response.json())
       .then((data) => setEndpoint(data.baseUrl || ""))
       .catch(() => undefined);
+    void refreshLocalStatus();
   }, []);
 
   async function saveEndpoint(url: string) {
@@ -130,7 +138,7 @@ export function VoiceSettings({
     setEndpointSaving(true);
     setEndpointNote("");
     try {
-      const response = await fetch("/api/voxcpm-local/start", { method: "POST" });
+      const response = await fetch("/api/voxcpm-local", { method: "POST" });
       const data = await response.json();
       if (!response.ok) {
         setEndpointNote(data.error || "Could not start local VoxCPM.");
@@ -142,6 +150,18 @@ export function VoiceSettings({
           ? "Local VoxCPM is already up — click Save & check."
           : "Starting locally. First run downloads the model (minutes). Click Save & check when it's ready."
       );
+      await refreshLocalStatus();
+    } finally {
+      setEndpointSaving(false);
+    }
+  }
+
+  async function stopLocal() {
+    setEndpointSaving(true);
+    try {
+      await fetch("/api/voxcpm-local", { method: "DELETE" });
+      setEndpointNote("Local VoxCPM stopped.");
+      await refreshLocalStatus();
     } finally {
       setEndpointSaving(false);
     }
@@ -243,11 +263,19 @@ export function VoiceSettings({
               <div className="flex flex-wrap items-center gap-2">
                 <button type="button" onClick={() => setEndpoint("https://openbmb-voxcpm-demo.hf.space")} className="studio-soft-chip-bg rounded-full border border-white/10 px-3 py-1 text-xs font-semibold text-studio-text">HF Space</button>
                 <button type="button" onClick={() => setEndpoint("http://localhost:7860")} className="studio-soft-chip-bg rounded-full border border-white/10 px-3 py-1 text-xs font-semibold text-studio-text">Local</button>
-                <button type="button" disabled={endpointSaving} onClick={() => void startLocal()} className="studio-soft-chip-bg rounded-full border border-white/10 px-3 py-1 text-xs font-semibold text-studio-text">Start local</button>
                 <button type="button" disabled={endpointSaving || !endpoint.trim()} onClick={() => void saveEndpoint(endpoint)} className="rounded-full bg-studio-accent px-3 py-1 text-xs font-semibold text-white disabled:opacity-45">
                   {endpointSaving ? "Saving..." : "Save & check"}
                 </button>
               </div>
+              {localStatus.configured && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-medium text-studio-muted">
+                    Local server: {localStatus.running ? "running" : "stopped"}{localStatus.reachable ? " · reachable" : ""}
+                  </span>
+                  <button type="button" disabled={endpointSaving || localStatus.running} onClick={() => void startLocal()} className="studio-soft-chip-bg rounded-full border border-white/10 px-3 py-1 text-xs font-semibold text-studio-text disabled:opacity-45">Start</button>
+                  <button type="button" disabled={endpointSaving || !localStatus.running} onClick={() => void stopLocal()} className="studio-soft-chip-bg rounded-full border border-white/10 px-3 py-1 text-xs font-semibold text-studio-text disabled:opacity-45">Stop</button>
+                </div>
+              )}
               {endpointNote && <p className="text-xs leading-5 text-studio-muted">{endpointNote}</p>}
             </div>
 
