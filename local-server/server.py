@@ -26,9 +26,11 @@ from voxcpm import VoxCPM
 
 # ponytail: torch auto-picks the device (CUDA if present, else CPU; MPS support depends on the
 # voxcpm build). Add a device knob here only if CPU is too slow and MPS isn't auto-selected.
-print("[thalika-local] loading VoxCPM2 (first run downloads the ~2B model)...", flush=True)
+# VOXCPM_MODEL_DIR points at a pre-downloaded local copy (e.g. from ModelScope); else pull from HF.
+MODEL = os.environ.get("VOXCPM_MODEL_DIR", "openbmb/VoxCPM2")
+print(f"[thalika-local] loading VoxCPM2 from '{MODEL}' ...", flush=True)
 try:
-    model = VoxCPM.from_pretrained("openbmb/VoxCPM2", load_denoiser=False)
+    model = VoxCPM.from_pretrained(MODEL, load_denoiser=False)
     print("[thalika-local] model loaded.", flush=True)
 except Exception as exc:  # noqa: BLE001 - surface a clear startup failure
     print(f"[thalika-local] FATAL: could not load VoxCPM2: {exc}", file=sys.stderr, flush=True)
