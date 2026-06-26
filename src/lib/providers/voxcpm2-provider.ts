@@ -119,14 +119,10 @@ async function submitVoxCPM2Generation(
   // NEVER send prompt_text (use_prompt_text=false): VoxCPM speaks the prompt transcript and
   // prepends it to the output ("ultimate mode" leak). Audio-only cloning is clean — proven by
   // direct testing — and means the user never has to type the reference transcript.
-  const continuityInstruction =
-    chunkCount > 1
-      ? ` This is segment ${chunkIndex + 1} of ${chunkCount}; keep the same speaker identity, pace, volume, accent, and emotional style so all segments join naturally.`
-      : "";
-  const controlInstruction =
-    cloneMode === "high_fidelity"
-      ? `Preserve the uploaded speaker identity as closely as possible: timbre, accent, pitch range, rhythm, breath, tone, speaking style, and Burmese pronunciation. Use ${emotionControls[input.emotion]} with ${speedControl(input.speed)}.${continuityInstruction}`
-      : `Clone the uploaded speaker while keeping natural speech. Use ${emotionControls[input.emotion]} with ${speedControl(input.speed)}.${continuityInstruction}`;
+  // Short STYLE descriptor: VoxCPM2 steers expression from a "(...)" prefix the server builds
+  // from this. The model already clones timbre from the reference, so the verbose "preserve
+  // identity" prose was dead weight; emotion + pace is what actually shapes delivery.
+  const controlInstruction = `${emotionControls[input.emotion]}, ${speedControl(input.speed)}`;
   const data: unknown[] = [
     scriptChunk,
     controlInstruction,

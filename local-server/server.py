@@ -39,38 +39,42 @@ except Exception as exc:  # noqa: BLE001 - surface a clear startup failure
 
 
 def generate(text, control, audio, use_prompt_text, prompt_text, cfg_value, normalize, denoise):
-    """Generate speech cloning the uploaded reference audio.
-
-    The signature/order MUST match the app's payload. `control` (the app's pacing/emotion
-    guidance string) and `prompt_text`/`use_prompt_text` are accepted for compatibility
-    but, like the public demo, the app always sends use_prompt_text=False with an empty
-    prompt_text (audio-only cloning avoids the transcript-leak bug).
+    """Exposes the full VoxCPM2 surface via the app's 8-arg payload:
+      - control non-empty -> "(style/description) text" prefix = Controllable Cloning / Voice Design
+      - audio present      -> Controllable Cloning (timbre from the reference)
+      - audio absent       -> Voice Design (a brand-new voice from the description, no reference)
+      - use_prompt_text + prompt_text -> Ultimate Cloning (exact-transcript continuation)
+      - Context-Aware prosody is automatic. (Streaming intentionally not wired — file-based pipeline.)
     """
     if not text or not text.strip():
         raise gr.Error("Text is required.")
-    if audio is None:
-        raise gr.Error("Reference audio is required for voice cloning.")
 
-    # Gradio passes the uploaded audio as (sample_rate, numpy_array) for gr.Audio inputs,
-    # or a filepath for gr.File inputs. Normalize to a path on disk that voxcpm can read.
-    ref_path = audio if isinstance(audio, str) else None
-    if ref_path is None:
-        try:
-            sample_rate, samples = audio  # (int, ndarray)
-        except (TypeError, ValueError) as exc:
-            raise gr.Error("Reference audio could not be read.") from exc
-        ref_path = os.path.join(tempfile.gettempdir(), "thalika_reference.wav")
-        sf.write(ref_path, np.asarray(samples), int(sample_rate))
+    # The model steers style/voice via a "(...)" prefix on the text — that's how control works.
+    if control and control.strip():
+        text = f"({control.strip()}) {text}"
+
+    # Reference is OPTIONAL: with it -> cloning; without it -> Voice Design.
+    ref_path = None
+    if audio is not None:
+        ref_path = audio if isinstance(audio, str) else None
+        if ref_path is None:
+            try:
+                sample_rate, samples = audio  # (int, ndarray)
+            except (TypeError, ValueError) as exc:
+                raise gr.Error("Reference audio could not be read.") from exc
+            ref_path = os.path.join(tempfile.gettempdir(), "thalika_reference.wav")
+            sf.write(ref_path, np.asarray(samples), int(sample_rate))
 
     cfg = float(cfg_value) if cfg_value is not None else 2.0
     timesteps = int(os.environ.get("VOXCPM_TIMESTEPS", "10"))
 
-    wav = model.generate(
-        text=text,
-        reference_wav_path=ref_path,
-        cfg_value=cfg,
-        inference_timesteps=timesteps,
-    )
+    kwargs = {"text": text, "cfg_value": cfg, "inference_timesteps": timesteps}
+    if ref_path:
+        kwargs["reference_wav_path"] = ref_path
+        if use_prompt_text and prompt_text and prompt_text.strip():
+            kwargs["prompt_wav_path"] = ref_path
+            kwargs["prompt_text"] = prompt_text.strip()
+    wav = model.generate(**kwargs)
 
     # Write a 16-bit PCM WAV at the model's real rate (VoxCPM2 = 48kHz). The app requires 48kHz
     # PCM WAV (src/lib/audio-utils.ts) — returning the wrong rate/format breaks its decoder.
