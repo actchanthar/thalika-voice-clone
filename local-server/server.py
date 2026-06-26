@@ -29,9 +29,13 @@ from voxcpm import VoxCPM
 # voxcpm build). Add a device knob here only if CPU is too slow and MPS isn't auto-selected.
 # VOXCPM_MODEL_DIR points at a pre-downloaded local copy (e.g. from ModelScope); else pull from HF.
 MODEL = os.environ.get("VOXCPM_MODEL_DIR", "openbmb/VoxCPM2")
-print(f"[thalika-local] loading VoxCPM2 from '{MODEL}' ...", flush=True)
+# Denoiser is OFF by default: it adds ~30s startup and the zipenhancer errors on some builds
+# (e.g. Apple MPS). Opt in with VOXCPM_LOAD_DENOISER=1 on hardware where it works; the per-request
+# `denoise` toggle is a safe no-op while it's off.
+LOAD_DENOISER = os.environ.get("VOXCPM_LOAD_DENOISER", "0") not in ("0", "false", "no")
+print(f"[thalika-local] loading VoxCPM2 from '{MODEL}' (denoiser={LOAD_DENOISER}) ...", flush=True)
 try:
-    model = VoxCPM.from_pretrained(MODEL, load_denoiser=False)
+    model = VoxCPM.from_pretrained(MODEL, load_denoiser=LOAD_DENOISER)
     print("[thalika-local] model loaded.", flush=True)
 except Exception as exc:  # noqa: BLE001 - surface a clear startup failure
     print(f"[thalika-local] FATAL: could not load VoxCPM2: {exc}", file=sys.stderr, flush=True)
@@ -68,7 +72,15 @@ def generate(text, control, audio, use_prompt_text, prompt_text, cfg_value, norm
     cfg = float(cfg_value) if cfg_value is not None else 2.0
     timesteps = int(inference_timesteps) if inference_timesteps else int(os.environ.get("VOXCPM_TIMESTEPS", "10"))
 
-    kwargs = {"text": text, "cfg_value": cfg, "inference_timesteps": timesteps}
+    # normalize (text) + denoise (reference) were sent by the app but dropped here — forward them.
+    # retry_badcase defaults True in the model, so repeat/echo bad cases are already auto-retried.
+    kwargs = {
+        "text": text,
+        "cfg_value": cfg,
+        "inference_timesteps": timesteps,
+        "normalize": bool(normalize),
+        "denoise": bool(denoise) and LOAD_DENOISER,
+    }
     if ref_path:
         kwargs["reference_wav_path"] = ref_path
         if use_prompt_text and prompt_text and prompt_text.strip():
